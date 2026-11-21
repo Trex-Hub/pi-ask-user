@@ -5,7 +5,7 @@
     "": {
       "name": "pi-ask-user",
       "dependencies": {
-        "@dev8-npm/pi-live": "github:Trex-Hub/pi-live",
+        "@dev8-npm/pi-live": "github:Trex-Hub/pi-live#928f2c7a9a606b7a9f762f09187294128b8ef218",
       },
       "devDependencies": {
         "@earendil-works/pi-coding-agent": "1.5.2",
@@ -65,7 +65,7 @@
 
     "@babel/runtime": ["@babel/runtime@7.29.7", "", {}, "sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw=="],
 
-    "@dev8-npm/pi-live": ["@dev8-npm/pi-live@github:Trex-Hub/pi-live#c68d3cd", { "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.74.0" } }, "Trex-Hub-pi-live-c68d3cd", "sha512-OY+wEFvzumuEMC7eqkQgrd3oDL2aDj7G3rFmxKRRERJm8UzkNOoH6q4CRh4Q1tMNpIcHyUOsExqJ8WXP91G6aw=="],
+    "@dev8-npm/pi-live": ["@dev8-npm/pi-live@github:Trex-Hub/pi-live#928f2c7", { "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.74.0" } }, "Trex-Hub-pi-live-928f2c7", "sha512-MLSmYGouGNPVjxSKKHu3e6i/UpRUxw4AGrMVz9XUHpQe2GgbK24HK7tb3CpDtoolvTUOl5bqjV0ZZupSkX6Rpw=="],
 
     "@earendil-works/pi-agent-core": ["@earendil-works/pi-agent-core@1.5.2", "", { "dependencies": { "@earendil-works/pi-ai": "1.5.2", "@earendil-works/pi-schema": "1.5.2" } }, "sha512-ie5mejS7mGfXt//9As7i3LfxVXdktZvF1JP4EQsUXTp4mU437h23MNGx7wXZ5VYs3YiG/Qnj3e7OZ2HC069OMw=="],
 

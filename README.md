@@ -252,16 +252,18 @@ With [pi-tern](https://github.com/edlsh/pi-tern) in a [Tern](https://stencil.so)
 
 While the custom prompt is open (inline or overlay, single question or batch, including while the overlay is hidden), `ask_user` passes `blocked: { kind: "question", message }` to `ctx.ui.custom()`, so pi reports the session as blocked on the user through its terminal program status (OSC 7501), the same way its own `input()`/`select()` dialogs do. Terminals and multiplexers that read it, such as herdr's "Needs You", show the agent as waiting. `message` is the question, or for a batch the heading or `N questions`, on one line of at most 80 characters. Older pi versions ignore the option.
 
-While an interactive prompt is open, the extension also emits `herdr:blocked` with `{ active: true, label: "Waiting for user response" }`. It emits `{ active: false }` in `finally`, including cancellation and error paths. Hosts without a listener are unaffected.
+While an interactive prompt is open, the extension also emits `herdr:blocked` with `{ active: true, label: "Waiting for user response", toolCallId }`. It emits `{ active: false, toolCallId }` in `finally`, including cancellation and error paths. Hosts without a listener are unaffected.
 
 When a displayed prompt resolves with an answer or cancellation, it emits `ask:answered` or `ask:cancelled`. Calls aborted before a prompt opens emit neither outcome event. Every installed extension receives these, so by default they carry only what is needed to correlate the prompt with its outcome:
 
 ```typescript
 // ask:answered
-{ question: string; response: { kind: "selection" | "freeform" } }
+{ question: string; response: { kind: "selection" | "freeform" }; toolCallId: string }
 // ask:cancelled
-{ question: string }
+{ question: string; toolCallId: string }
 ```
+
+`toolCallId` is the id of the `ask_user` tool call that opened the prompt, so a listener can match `herdr:blocked`, `ask:answered` and `ask:cancelled` to one call even when two calls ask the same question. Every question of a batch carries the batch call's id.
 
 A batch publishes nothing until the user submits it. Then each answered question emits `ask:answered` and skipped questions emit nothing; a cancelled batch emits `ask:cancelled` for every question. Batch events carry the same payload plus the question's position:
 

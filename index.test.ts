@@ -344,8 +344,8 @@ describe("ask_user", () => {
       );
 
       expect(emittedEvents.filter((event) => event.name === "herdr:blocked")).toEqual([
-         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response" } },
-         { name: "herdr:blocked", payload: { active: false } },
+         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response", toolCallId: "tool-call-id" } },
+         { name: "herdr:blocked", payload: { active: false, toolCallId: "tool-call-id" } },
       ]);
    });
 
@@ -361,8 +361,8 @@ describe("ask_user", () => {
       );
 
       expect(emittedEvents.filter((event) => event.name === "herdr:blocked")).toEqual([
-         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response" } },
-         { name: "herdr:blocked", payload: { active: false } },
+         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response", toolCallId: "tool-call-id" } },
+         { name: "herdr:blocked", payload: { active: false, toolCallId: "tool-call-id" } },
       ]);
    });
 
@@ -379,8 +379,8 @@ describe("ask_user", () => {
 
       expect(error.message).toBe("UI failed");
       expect(emittedEvents.filter((event) => event.name === "herdr:blocked")).toEqual([
-         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response" } },
-         { name: "herdr:blocked", payload: { active: false } },
+         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response", toolCallId: "tool-call-id" } },
+         { name: "herdr:blocked", payload: { active: false, toolCallId: "tool-call-id" } },
       ]);
    });
 
@@ -414,8 +414,8 @@ describe("ask_user", () => {
 
       expect(result.details.cancelled).toBe(true);
       expect(emittedEvents.filter((event) => event.name === "herdr:blocked")).toEqual([
-         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response" } },
-         { name: "herdr:blocked", payload: { active: false } },
+         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response", toolCallId: "tool-call-id" } },
+         { name: "herdr:blocked", payload: { active: false, toolCallId: "tool-call-id" } },
       ]);
    });
 
@@ -443,7 +443,7 @@ describe("ask_user", () => {
 
          expect(result.details.response).toEqual({ kind: "freeform", text: "my private answer" });
          expect(emittedEvents.filter((event) => event.name === "ask:answered")).toEqual([
-            { name: "ask:answered", payload: { question: "Why?", response: { kind: "freeform" } } },
+            { name: "ask:answered", payload: { question: "Why?", response: { kind: "freeform" }, toolCallId: "tool-call-id" } },
          ]);
       });
 
@@ -453,7 +453,7 @@ describe("ask_user", () => {
 
          expect(result.details.cancelled).toBe(true);
          expect(emittedEvents.filter((event) => event.name === "ask:cancelled")).toEqual([
-            { name: "ask:cancelled", payload: { question: "Pick" } },
+            { name: "ask:cancelled", payload: { question: "Pick", toolCallId: "tool-call-id" } },
          ]);
       });
 
@@ -466,7 +466,7 @@ describe("ask_user", () => {
          expect(emittedEvents.filter((event) => event.name.startsWith("ask:"))).toEqual([
             {
                name: "ask:answered",
-               payload: { question: "Why?", context: "secret context", response: { kind: "freeform", text: "my private answer" } },
+               payload: { question: "Why?", context: "secret context", response: { kind: "freeform", text: "my private answer" }, toolCallId: "tool-call-id" },
             },
             {
                name: "ask:cancelled",
@@ -474,6 +474,7 @@ describe("ask_user", () => {
                   question: "Pick",
                   context: "secret context",
                   options: [{ title: "A" }, { title: "B" }],
+                  toolCallId: "tool-call-id",
                },
             },
          ]);
@@ -1657,7 +1658,7 @@ describe("ask_user", () => {
       expect(result.isError).not.toBe(true);
       expect(result.details.response).toEqual({ kind: "freeform", text: "custom from editor" });
       expect(result.details.cancelled).toBe(false);
-      expect(answeredEvent?.payload).toEqual({ question: "Which option should we use?", response: { kind: "freeform" } });
+      expect(answeredEvent?.payload).toEqual({ question: "Which option should we use?", response: { kind: "freeform" }, toolCallId: "tool-call-id" });
       expect(editorInputs).toEqual(["enter"]);
    });
 
@@ -3303,7 +3304,7 @@ describe("cancellation correctness", () => {
             expect(result.details.response).toBeNull();
             expect(calls).toBe(callsBeforeAbort);
             expect(emittedEvents.filter((event) => event.name.startsWith("ask:"))).toEqual([
-               { name: "ask:cancelled", payload: { question: "Pick" } },
+               { name: "ask:cancelled", payload: { question: "Pick", toolCallId: "id" } },
             ]);
          });
       }
@@ -3381,8 +3382,8 @@ describe("cancellation correctness", () => {
             expect(result.details.cancelled).toBe(true);
             expect(emittedEvents.filter((event) => event.name.startsWith("ask:"))).toEqual([
                { name: "ask:cancelled", payload: fullEvents
-                  ? { question: "Why?", context: "private context", options: [] }
-                  : { question: "Why?" } },
+                  ? { question: "Why?", context: "private context", options: [], toolCallId: "id" }
+                  : { question: "Why?", toolCallId: "id" } },
             ]);
          });
       }
@@ -3470,7 +3471,7 @@ describe("cancellation correctness", () => {
          controller.abort();
          component?.handleInput("enter");
          expect(completions).toBe(isError ? 0 : 1);
-         expect(emittedEvents.filter((event) => event.name === "herdr:blocked").at(-1)?.payload).toEqual({ active: false });
+         expect(emittedEvents.filter((event) => event.name === "herdr:blocked").at(-1)?.payload).toEqual({ active: false, toolCallId: "id" });
       });
    }
 });
@@ -3625,10 +3626,10 @@ test("top-level single-question fields sent with questions are ignored (#88)", a
          text: "User answered 2 of 2 questions:\n1. Which database? → Postgres\n2. Anything else? → No",
       }]);
       expect(emittedEvents).toEqual([
-         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response" } },
-         { name: "herdr:blocked", payload: { active: false } },
-         { name: "ask:answered", payload: { question: "Which database?", response: { kind: "selection" }, batch: { index: 0, total: 2 } } },
-         { name: "ask:answered", payload: { question: "Anything else?", response: { kind: "freeform" }, batch: { index: 1, total: 2 } } },
+         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response", toolCallId: "id" } },
+         { name: "herdr:blocked", payload: { active: false, toolCallId: "id" } },
+         { name: "ask:answered", payload: { question: "Which database?", response: { kind: "selection" }, batch: { index: 0, total: 2 }, toolCallId: "id" } },
+         { name: "ask:answered", payload: { question: "Anything else?", response: { kind: "freeform" }, batch: { index: 1, total: 2 }, toolCallId: "id" } },
       ]);
    });
 
@@ -3719,7 +3720,7 @@ test("top-level single-question fields sent with questions are ignored (#88)", a
          text: "User answered 1 of 2 questions:\n1. First? → A\n2. Second? → (skipped)",
       }]);
       expect(emittedEvents.filter((event) => event.name.startsWith("ask:"))).toEqual([
-         { name: "ask:answered", payload: { question: "First?", response: { kind: "selection" }, batch: { index: 0, total: 2 } } },
+         { name: "ask:answered", payload: { question: "First?", response: { kind: "selection" }, batch: { index: 0, total: 2 }, toolCallId: "id" } },
       ]);
    });
 
@@ -3829,8 +3830,8 @@ test("top-level single-question fields sent with questions are ignored (#88)", a
          expect(prompts).toBe(1);
          expect(result.content).toEqual([{ type: "text", text: "User cancelled the questions" }]);
          expect(emittedEvents.filter((event) => event.name.startsWith("ask:"))).toEqual([
-            { name: "ask:cancelled", payload: { question: "First?", batch: { index: 0, total: 2 } } },
-            { name: "ask:cancelled", payload: { question: "Second?", batch: { index: 1, total: 2 } } },
+            { name: "ask:cancelled", payload: { question: "First?", batch: { index: 0, total: 2 }, toolCallId: "id" } },
+            { name: "ask:cancelled", payload: { question: "Second?", batch: { index: 1, total: 2 }, toolCallId: "id" } },
          ]);
       });
    }
@@ -4299,5 +4300,79 @@ describe("Needs You (blocked program status)", () => {
       expect(options.blocked.message).toStartWith("Should we really really");
       expect(options.blocked.message).toEndWith("…");
       expect(options.blocked.message).not.toContain("\n");
+   });
+});
+
+describe("tool call id on events", () => {
+   const answering = (response: unknown) => ({ hasUI: true, ui: { custom: async () => response } });
+
+   test("herdr:blocked (both states) and ask:answered carry the tool call id", async () => {
+      const tool = await setupTool();
+      await tool.execute("call_answer", { question: "Color?", options: ["Green"] }, undefined, undefined,
+         answering({ kind: "selection", selections: ["Green"] }));
+      expect(emittedEvents).toEqual([
+         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response", toolCallId: "call_answer" } },
+         { name: "herdr:blocked", payload: { active: false, toolCallId: "call_answer" } },
+         { name: "ask:answered", payload: { question: "Color?", response: { kind: "selection" }, toolCallId: "call_answer" } },
+      ]);
+   });
+
+   test("ask:cancelled carries the tool call id, with full events too", async () => {
+      stubEnv("PI_ASK_USER_EMIT_FULL_EVENTS", "true");
+      const tool = await setupTool();
+      await tool.execute("call_cancel", { question: "Color?", options: ["Green"] }, undefined, undefined, answering(null));
+      expect(emittedEvents.filter((event) => event.name === "ask:cancelled")).toEqual([
+         { name: "ask:cancelled", payload: { question: "Color?", options: [{ title: "Green" }], toolCallId: "call_cancel" } },
+      ]);
+   });
+
+   test("the options-less question carries the tool call id", async () => {
+      const tool = await setupTool();
+      await tool.execute("call_input", { question: "Why?" }, undefined, undefined, { hasUI: true, ui: { input: async () => "Because" } });
+      expect(emittedEvents.map((event) => event.payload.toolCallId)).toEqual(["call_input", "call_input", "call_input"]);
+   });
+
+   test("batch events carry the tool call id", async () => {
+      const tool = await setupTool();
+      await tool.execute(
+         "call_batch",
+         { questions: [{ question: "First?", options: ["A"] }, { question: "Second?", options: ["B"] }] },
+         undefined,
+         undefined,
+         answering([{ status: "answered", response: { kind: "selection", selections: ["A"] } }, { status: "skipped" }]),
+      );
+      await tool.execute("call_batch_cancel", { questions: [{ question: "First?" }, { question: "Second?" }] }, undefined, undefined, answering(null));
+      expect(emittedEvents.map((event) => [event.name, event.payload.toolCallId])).toEqual([
+         ["herdr:blocked", "call_batch"],
+         ["herdr:blocked", "call_batch"],
+         ["ask:answered", "call_batch"],
+         ["herdr:blocked", "call_batch_cancel"],
+         ["herdr:blocked", "call_batch_cancel"],
+         ["ask:cancelled", "call_batch_cancel"],
+         ["ask:cancelled", "call_batch_cancel"],
+      ]);
+   });
+
+   test("two calls with the same question text are told apart by their ids", async () => {
+      const tool = await setupTool();
+      let release!: (value: unknown) => void;
+      const first = tool.execute("call_1", { question: "Color?", options: ["Green", "Blue"] }, undefined, undefined, {
+         hasUI: true,
+         ui: { custom: () => new Promise((resolve) => { release = resolve; }) },
+      });
+      await tool.execute("call_2", { question: "Color?", options: ["Green", "Blue"] }, undefined, undefined,
+         answering({ kind: "selection", selections: ["Blue"] }));
+      release(null);
+      await first;
+      expect(emittedEvents.filter((event) => event.name.startsWith("ask:"))).toEqual([
+         { name: "ask:answered", payload: { question: "Color?", response: { kind: "selection" }, toolCallId: "call_2" } },
+         { name: "ask:cancelled", payload: { question: "Color?", toolCallId: "call_1" } },
+      ]);
+      expect(emittedEvents.filter((event) => event.name === "herdr:blocked").map((event) => event.payload)).toEqual([
+         { active: true, label: "Waiting for user response", toolCallId: "call_1" },
+         { active: true, label: "Waiting for user response", toolCallId: "call_2" },
+         { active: false, toolCallId: "call_2" },
+         { active: false, toolCallId: "call_1" },
+      ]);
    });
 });

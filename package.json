@@ -27,7 +27,8 @@
   },
   "pi": {
     "extensions": [
-      "./index.ts"
+      "./index.ts",
+      "./node_modules/@dev8-npm/pi-live/index.ts"
     ],
     "skills": [
       "./skills"
@@ -63,5 +64,8 @@
     "@earendil-works/pi-coding-agent": ">=0.74.0",
     "@earendil-works/pi-tui": ">=0.74.0",
     "@sinclair/typebox": "*"
+  },
+  "dependencies": {
+    "@dev8-npm/pi-live": "github:Trex-Hub/pi-live"
   }
 }

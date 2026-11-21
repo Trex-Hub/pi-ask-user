@@ -24,8 +24,8 @@ High-quality video: [ask-user-demo.mp4](https://github.com/edlsh/pi-ask-user/blo
 - Custom TUI rendering for tool calls and results
 - System prompt integration via `promptSnippet` and `promptGuidelines`
 - Optional timeout for auto-dismiss in both overlay and fallback input modes
-- Reports pi's "blocked on user" program status while a prompt is open, plus `herdr:blocked` lifecycle events
-- Answerable from other devices through pi-live (`@dev8-npm/pi-live`) while the terminal prompt stays open; first answer wins
+- Reports pi's "waiting for user" status while a prompt is open, so terminals and multiplexers can show the session as waiting
+- Prompts can also be answered from other programs through the bundled [pi-live](https://github.com/Trex-Hub/pi-live) socket; the terminal prompt stays open and the first answer wins
 - Structured response and cancellation `details` for session state reconstruction
 - Graceful fallback when interactive UI is unavailable
 - Bundled `ask-user` skill for mandatory decision-gating in high-stakes or ambiguous tasks
@@ -50,8 +50,12 @@ See: `skills/ask-user/references/ask-user-skill-extension-spec.md`.
 ## Install
 
 ```bash
-pi install npm:pi-ask-user
+pi install git:github.com/Trex-Hub/pi-ask-user
 ```
+
+This also installs [pi-live](https://github.com/Trex-Hub/pi-live), which lets other programs answer open prompts. See [Answering from other programs](#answering-from-other-programs).
+
+`ask_user` can be registered only once. If you have the npm package installed, remove it first with `pi remove npm:pi-ask-user`.
 
 ## Tool name
 
@@ -251,7 +255,7 @@ With [pi-tern](https://github.com/edlsh/pi-tern) in a [Tern](https://stencil.so)
 
 ### Events
 
-While the custom prompt is open (inline or overlay, single question or batch, including while the overlay is hidden), `ask_user` passes `blocked: { kind: "question", message }` to `ctx.ui.custom()`, so pi reports the session as blocked on the user through its terminal program status (OSC 7501), the same way its own `input()`/`select()` dialogs do. Terminals and multiplexers that read it, such as herdr's "Needs You", show the agent as waiting. `message` is the question, or for a batch the heading or `N questions`, on one line of at most 80 characters. Older pi versions ignore the option.
+While the custom prompt is open (inline or overlay, single question or batch, including while the overlay is hidden), `ask_user` passes `blocked: { kind: "question", message }` to `ctx.ui.custom()`, so pi reports the session as blocked on the user through its terminal program status (OSC 7501), the same way its own `input()`/`select()` dialogs do. Terminals and multiplexers that read it can show the session as waiting for input. `message` is the question, or for a batch the heading or `N questions`, on one line of at most 80 characters. Older pi versions ignore the option.
 
 While an interactive prompt is open, the extension also emits `herdr:blocked` with `{ active: true, label: "Waiting for user response", toolCallId }`. It emits `{ active: false, toolCallId }` in `finally`, including cancellation and error paths. Hosts without a listener are unaffected.
 
@@ -274,44 +278,70 @@ A batch publishes nothing until the user submits it. Then each answered question
 
 Set `PI_ASK_USER_EMIT_FULL_EVENTS=true` (or `1`, `yes`, `on`), or `"emitFullEvents": true` in `ask-user.json`, to restore the full payloads — `context`, the offered `options` on cancel, and the complete `response` including selections, comment, and freeform text. Leave it unset unless another extension you trust needs the answer itself; the full response is always available to the agent through the tool result's `details`.
 
-### Answering from other devices (pi-live)
+### Answering from other programs
 
-With pi-live (`@dev8-npm/pi-live`) loaded, an open custom prompt (single question or batch, inline or overlay, including while the overlay is hidden) is also offered to pi-live's local socket clients, such as herdr-web, a CLI or a phone. The terminal prompt stays open. Whichever answer comes first wins: a client answer closes the terminal prompt, and a keypress, timeout or abort closes the item for clients. A client answer gives exactly the same tool result, `details`, rendering and `ask:answered` events as answering from the keyboard, so neither the agent nor the transcript can tell the two apart. Without pi-live, or with `PI_LIVE_ENABLED=0`, nothing changes.
+This package bundles [pi-live](https://github.com/Trex-Hub/pi-live), which gives each pi session a local socket. While a prompt is open, `ask_user` offers it to pi-live, so a program connected to the socket can show the question and send an answer. The terminal prompt stays open, and the first valid answer wins, from the keyboard or a client.
 
-`ask_user` talks to pi-live only through pi's event bus (`pi-live:park`) and never imports it. Each prompt is parked with the tool call's id, `owner: "ask_user"`, and a JSON `view` for clients to render:
+An answer from a client gives exactly the same tool result, rendering and `ask:answered` events as the same answer typed at the keyboard. The agent and the transcript can't tell them apart.
+
+To turn this off, set `PI_LIVE_ENABLED=0`, or put `{ "enabled": false }` in `~/.pi/agent/pi-live.json`. Prompts are then answered only at the keyboard. See the [pi-live README](https://github.com/Trex-Hub/pi-live#security) for who can reach the socket.
+
+**What's offered:** single questions and batches in both display modes, including while the overlay is hidden, and in interactive mode, the text input of a question without options. In RPC mode nothing is offered, because pi can't tell an RPC client to close a dialog that was answered somewhere else.
+
+**Items:** each prompt becomes a pi-live item with the tool call's id as its `id`, `owner` `"ask_user"`, and one of two kinds. A prompt with a `timeout` also has `expiresAt`, in epoch milliseconds.
 
 ```jsonc
-// kind "ask_user.question", title: the question
+// kind "ask_user.question"; title: the question
 {
   "question": "Which color?",
-  "context": "We need a theme for…",          // omitted if none
+  "context": "We need a theme for the dashboard.", // omitted if there is none
   "options": [{ "title": "Green", "description": "Calm" }, { "title": "Blue" }],
   "allowMultiple": false,
   "allowFreeform": true,
   "allowComment": false,
-  "answer": { "kind": "selection | freeform" }  // hint only
+  "answer": { "kind": "selection | freeform" }
 }
 
-// kind "ask_user.batch", title: the heading, or "N questions"
+// kind "ask_user.batch"; title: the batch heading (the call's `question`), or "N questions"
 {
-  "heading": "Setup",                          // omitted if none
+  "heading": "Project setup", // omitted if there is none
   "allowComment": false,
-  "questions": [{ "question": "…", "context": "…", "options": [], "allowMultiple": false, "allowFreeform": true }]
+  "questions": [
+    { "question": "Database?", "options": [{ "title": "SQLite" }, { "title": "Postgres" }], "allowMultiple": false, "allowFreeform": true }
+  ]
 }
 ```
 
-With a `timeout`, the item also carries `expiresAt` (epoch ms). Clients answer a question with an `AskResponse`, and a batch with `{ answers: BatchAnswer[] }`, one per question in order:
+**Answers:** answer a question with an `AskResponse`, and a batch with one `BatchAnswer` per question, in order:
 
 ```typescript
-type AskResponse = { kind: "selection"; selections: string[]; comment?: string } | { kind: "freeform"; text: string };
+type AskResponse =
+  | { kind: "selection"; selections: string[]; comment?: string }
+  | { kind: "freeform"; text: string };
+
 type BatchAnswer = { status: "answered"; response: AskResponse } | { status: "skipped" };
+
+// Batch answer
+{ answers: BatchAnswer[] }
 ```
 
-An answer is accepted only if the keyboard could have given it: selections must be offered option titles, without duplicates and only one unless `allowMultiple`; a `comment` only with `allowComment`; `freeform` only with `allowFreeform` or for a question without options. Text is trimmed, an empty comment is dropped, and selections come back in option order. Any question of a batch may be skipped, all of them included, as on the review page. Anything else is rejected with a short reason such as `option "Purple" not offered` or `expected 3 answers, got 2`, and the prompt stays open.
+```jsonc
+// A question
+{ "kind": "selection", "selections": ["Blue"] }
+// A batch of two questions
+{ "answers": [{ "status": "answered", "response": { "kind": "freeform", "text": "SQLite for now" } }, { "status": "skipped" }] }
+```
 
-**Privacy:** the `view` always includes the question's `context` and the option descriptions, whatever `emitFullEvents` says. That setting controls what every installed extension sees on the event bus; the view goes only to pi-live, whose socket is reachable only by your user, and clients can't show the question without it.
+An answer is accepted only if it could have been given at the keyboard:
 
-Parking covers the custom prompt and, in the TUI, the input dialog of a question without options. In RPC mode (`--mode rpc`, where the dialogs are shown by the RPC client) nothing is parked: pi has no way to tell the client to close a dialog that was answered elsewhere, so those prompts stay keyboard-only.
+- Selections must be titles of offered options, with no duplicates, and only one unless `allowMultiple` is set.
+- A `comment` needs `allowComment`.
+- Freeform text needs `allowFreeform`, or a question without options.
+- Any batch question may be skipped, including all of them.
+
+Text is trimmed, an empty comment is dropped, and selections are put in option order. Any other answer is rejected with a short reason, such as `option "Purple" not offered` or `expected 3 answers, got 2`, and the prompt stays open.
+
+**Privacy:** items include the question's context and option descriptions, whatever `emitFullEvents` is set to. That setting controls what other extensions receive on the event bus. Items go only to pi-live's socket clients, which need the full question to show it.
 
 ## Known limitations
 

@@ -24,7 +24,7 @@ High-quality video: [ask-user-demo.mp4](https://github.com/edlsh/pi-ask-user/blo
 - Custom TUI rendering for tool calls and results
 - System prompt integration via `promptSnippet` and `promptGuidelines`
 - Optional timeout for auto-dismiss in both overlay and fallback input modes
-- `herdr:blocked` lifecycle events while waiting for interactive input
+- Reports pi's "blocked on user" program status while a prompt is open, plus `herdr:blocked` lifecycle events
 - Structured response and cancellation `details` for session state reconstruction
 - Graceful fallback when interactive UI is unavailable
 - Bundled `ask-user` skill for mandatory decision-gating in high-stakes or ambiguous tasks
@@ -250,7 +250,9 @@ With [pi-tern](https://github.com/edlsh/pi-tern) in a [Tern](https://stencil.so)
 
 ### Events
 
-While an interactive prompt is open, the extension emits `herdr:blocked` with `{ active: true, label: "Waiting for user response" }`. It emits `{ active: false }` in `finally`, including cancellation and error paths. Hosts without a listener are unaffected.
+While the custom prompt is open (inline or overlay, single question or batch, including while the overlay is hidden), `ask_user` passes `blocked: { kind: "question", message }` to `ctx.ui.custom()`, so pi reports the session as blocked on the user through its terminal program status (OSC 7501), the same way its own `input()`/`select()` dialogs do. Terminals and multiplexers that read it, such as herdr's "Needs You", show the agent as waiting. `message` is the question, or for a batch the heading or `N questions`, on one line of at most 80 characters. Older pi versions ignore the option.
+
+While an interactive prompt is open, the extension also emits `herdr:blocked` with `{ active: true, label: "Waiting for user response" }`. It emits `{ active: false }` in `finally`, including cancellation and error paths. Hosts without a listener are unaffected.
 
 When a displayed prompt resolves with an answer or cancellation, it emits `ask:answered` or `ask:cancelled`. Calls aborted before a prompt opens emit neither outcome event. Every installed extension receives these, so by default they carry only what is needed to correlate the prompt with its outcome:
 

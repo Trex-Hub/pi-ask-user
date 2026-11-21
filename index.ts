@@ -517,13 +517,35 @@ function matchesSelectDown(data: string, keybindings: KeybindingsManager): boole
    );
 }
 
+const BLOCKED_MESSAGE_MAX_LENGTH = 80;
+
+/** What pi reports while ask_user waits ("Needs You"): the question or batch heading, on one short line. */
+function blockedMessage(text: string): string {
+   const line = text.replace(/\s+/g, " ").trim();
+   return line.length > BLOCKED_MESSAGE_MAX_LENGTH ? `${line.slice(0, BLOCKED_MESSAGE_MAX_LENGTH - 1)}…` : line;
+}
+
+interface AskBlockedStatus {
+   kind: "question";
+   message: string;
+}
+
+// `blocked` makes pi report the session as waiting on the user (OSC 7501
+// program status, shown as "Needs You" by herdr) for as long as the prompt is
+// open, including while the overlay is hidden. Older hosts ignore the option.
 function buildCustomUIOptions(
    displayMode: AskDisplayMode,
+   blocked: AskBlockedStatus,
    onHandle?: (handle: OverlayHandle) => void,
-): { overlay?: boolean; overlayOptions?: OverlayOptions; onHandle?: (handle: OverlayHandle) => void } | undefined {
+): {
+   overlay?: boolean;
+   overlayOptions?: OverlayOptions;
+   onHandle?: (handle: OverlayHandle) => void;
+   blocked: AskBlockedStatus;
+} {
    switch (displayMode) {
       case "inline":
-         return undefined;
+         return { blocked };
       case "overlay":
          return {
             overlay: true,
@@ -534,6 +556,7 @@ function buildCustomUIOptions(
                maxHeight: "85%",
                margin: 1,
             },
+            blocked,
             ...(onHandle ? { onHandle } : {}),
          };
       default: {
@@ -548,6 +571,7 @@ function buildCustomUIOptions(
                maxHeight: "85%",
                margin: 1,
             },
+            blocked,
             ...(onHandle ? { onHandle } : {}),
          };
       }
@@ -2681,6 +2705,8 @@ interface CustomPromptRequest<T> {
    timeout?: number;
    displayMode: AskDisplayMode;
    overlayToggle: ResolvedShortcut;
+   /** Short text pi reports while the prompt waits on the user (see buildCustomUIOptions). */
+   blockedMessage: string;
    createComponent: (
       tui: TUI,
       theme: Theme,
@@ -2755,7 +2781,7 @@ async function runCustomPrompt<T>(ui: ExtensionUIContext, request: CustomPromptR
 
       const customResult = signal?.aborted ? null : await ui.custom<T | null>(
          customFactory,
-         buildCustomUIOptions(displayMode, (handle) => {
+         buildCustomUIOptions(displayMode, { kind: "question", message: blockedMessage(request.blockedMessage) }, (handle) => {
             overlayHandle = handle;
          }),
       );
@@ -2948,6 +2974,7 @@ async function executeBatch(
          signal: batch.signal,
          displayMode: settings.displayMode,
          overlayToggle: settings.shortcuts.overlayToggle,
+         blockedMessage: heading ?? `${questions.length} questions`,
          createComponent: (tui, theme, keybindings, complete) =>
             new BatchAskComponent(questions, settings, tui, theme, keybindings, complete, heading),
          fallback: () => askBatchViaDialogs(ctx.ui, questions, settings.allowComment, batch.signal, deadline, heading),
@@ -3229,6 +3256,7 @@ export default function(pi: ExtensionAPI) {
             timeout,
             displayMode: settings.displayMode,
             overlayToggle: settings.shortcuts.overlayToggle,
+            blockedMessage: question,
             createComponent: (tui, theme, keybindings, complete) => new AskComponent(
                question,
                normalizedContext,

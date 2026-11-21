@@ -88,7 +88,7 @@ const rpcResult = await tool.execute("smoke-rpc", {
 assert.equal(selected, true);
 assert.equal(rpcResult.details.cancelled, false);
 assert.deepEqual(rpcResult.details.response, { kind: "selection", selections: ["Yes"] });
-assert.deepEqual(answered, [{ question: "Continue?", response: { kind: "selection" } }]);
+assert.deepEqual(answered, [{ question: "Continue?", response: { kind: "selection" }, toolCallId: "smoke-rpc" }]);
 assert.deepEqual(blocked, [true, false]);
 
 await assert.rejects(

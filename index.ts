@@ -2667,12 +2667,12 @@ function resolvePromptSettings(params: AskParams): PromptSettings {
 }
 
 /** Report the session as blocked on the user (`herdr:blocked`) for the duration of `run`. */
-async function whileBlocked<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
-   pi.events.emit("herdr:blocked", { active: true, label: "Waiting for user response" });
+async function whileBlocked<T>(pi: ExtensionAPI, toolCallId: string, run: () => Promise<T>): Promise<T> {
+   pi.events.emit("herdr:blocked", { active: true, label: "Waiting for user response", toolCallId });
    try {
       return await run();
    } finally {
-      pi.events.emit("herdr:blocked", { active: false });
+      pi.events.emit("herdr:blocked", { active: false, toolCallId });
    }
 }
 
@@ -2845,11 +2845,12 @@ interface BatchPosition {
    total: number;
 }
 
-function createAskEventEmitter(pi: ExtensionAPI) {
+function createAskEventEmitter(pi: ExtensionAPI, toolCallId: string) {
    // Every installed extension receives these events. By default only the
    // question and the response kind are broadcast; the context and the
    // user's actual selections/comment/freeform text stay inside the tool
-   // result unless the user opts in (#51).
+   // result unless the user opts in (#51). The tool call id is always
+   // included so listeners can tell apart two calls asking the same question.
    const emitFullEvents = parseBooleanPreference(process.env.PI_ASK_USER_EMIT_FULL_EVENTS)
       ?? loadAskUserSettings().emitFullEvents
       ?? false;
@@ -2859,8 +2860,8 @@ function createAskEventEmitter(pi: ExtensionAPI) {
          pi.events.emit(
             "ask:answered",
             emitFullEvents
-               ? { question: subject.question, context: subject.context, response, ...position }
-               : { question: subject.question, response: { kind: response.kind }, ...position },
+               ? { question: subject.question, context: subject.context, response, ...position, toolCallId }
+               : { question: subject.question, response: { kind: response.kind }, ...position, toolCallId },
          );
       },
       cancelled(subject: AskEventSubject, batch?: BatchPosition): void {
@@ -2868,8 +2869,8 @@ function createAskEventEmitter(pi: ExtensionAPI) {
          pi.events.emit(
             "ask:cancelled",
             emitFullEvents
-               ? { question: subject.question, context: subject.context, options: subject.options, ...position }
-               : { question: subject.question, ...position },
+               ? { question: subject.question, context: subject.context, options: subject.options, ...position, toolCallId }
+               : { question: subject.question, ...position, toolCallId },
          );
       },
    };
@@ -2904,6 +2905,7 @@ function formatBatchForMessage(questions: BatchQuestion[], allowComment: boolean
 
 async function executeBatch(
    pi: ExtensionAPI,
+   toolCallId: string,
    params: AskParams,
    signal: AbortSignal | undefined,
    onUpdate: AgentToolUpdateCallback<AskBatchDetails> | undefined,
@@ -2912,7 +2914,7 @@ async function executeBatch(
    const questions = normalizeBatchQuestions(params);
    const heading = batchHeading(params);
    const settings = resolvePromptSettings(params);
-   const events = createAskEventEmitter(pi);
+   const events = createAskEventEmitter(pi, toolCallId);
    const subjects = questions.map(({ question, context, options }) => ({ question, context, options }));
    const details = (answers: BatchAnswer[], cancelled: boolean): AskBatchDetails => ({
       kind: "batch",
@@ -2944,7 +2946,7 @@ async function executeBatch(
    const deadlineTimer = deadline === undefined ? undefined : setTimeout(() => batch.abort(), params.timeout);
    let answers: BatchAnswer[] | null;
    try {
-      answers = await whileBlocked(pi, () => runCustomPrompt<BatchAnswer[]>(ctx.ui, {
+      answers = await whileBlocked(pi, toolCallId, () => runCustomPrompt<BatchAnswer[]>(ctx.ui, {
          signal: batch.signal,
          displayMode: settings.displayMode,
          overlayToggle: settings.shortcuts.overlayToggle,
@@ -3139,7 +3141,7 @@ export default function(pi: ExtensionAPI) {
          ),
       }),
 
-      async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      async execute(toolCallId, params, signal, onUpdate, ctx) {
          if ((params as AskParams).questions != null) {
             if (signal?.aborted) {
                return {
@@ -3147,7 +3149,7 @@ export default function(pi: ExtensionAPI) {
                   details: { kind: "batch", questions: [], answers: [], cancelled: true } as AskBatchDetails,
                };
             }
-            return executeBatch(pi, params as AskParams, signal, onUpdate, ctx);
+            return executeBatch(pi, toolCallId, params as AskParams, signal, onUpdate, ctx);
          }
 
          if (signal?.aborted) {
@@ -3178,7 +3180,7 @@ export default function(pi: ExtensionAPI) {
          const dialogOpts = signal
             ? (timeout ? { signal, timeout } : { signal })
             : (timeout ? { timeout } : undefined);
-         const events = createAskEventEmitter(pi);
+         const events = createAskEventEmitter(pi, toolCallId);
          const subject: AskEventSubject = { question, context: normalizedContext, options };
 
          if (rawOptions.length > 0 && options.length === 0) {
@@ -3201,7 +3203,7 @@ export default function(pi: ExtensionAPI) {
 
          if (options.length === 0) {
             const prompt = normalizedContext ? `${question}\n\nContext:\n${normalizedContext}` : question;
-            const answer = await whileBlocked(pi, () => ctx.ui.input(prompt, "Type your answer...", dialogOpts));
+            const answer = await whileBlocked(pi, toolCallId, () => ctx.ui.input(prompt, "Type your answer...", dialogOpts));
             const response = signal?.aborted ? null : createFreeformResponse(answer);
 
             if (!response) {
@@ -3224,7 +3226,7 @@ export default function(pi: ExtensionAPI) {
             details: { question, context: normalizedContext, options, response: null, cancelled: false },
          });
 
-         const result = await whileBlocked(pi, () => runCustomPrompt<AskUIResult>(ctx.ui, {
+         const result = await whileBlocked(pi, toolCallId, () => runCustomPrompt<AskUIResult>(ctx.ui, {
             signal,
             timeout,
             displayMode: settings.displayMode,

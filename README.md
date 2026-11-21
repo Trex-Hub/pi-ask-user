@@ -311,7 +311,7 @@ An answer is accepted only if the keyboard could have given it: selections must 
 
 **Privacy:** the `view` always includes the question's `context` and the option descriptions, whatever `emitFullEvents` says. That setting controls what every installed extension sees on the event bus; the view goes only to pi-live, whose socket is reachable only by your user, and clients can't show the question without it.
 
-Parking covers the custom prompt. The RPC/headless dialogs and the input dialog of a question without options are keyboard-only.
+Parking covers the custom prompt and, in the TUI, the input dialog of a question without options. In RPC mode (`--mode rpc`, where the dialogs are shown by the RPC client) nothing is parked: pi has no way to tell the client to close a dialog that was answered elsewhere, so those prompts stay keyboard-only.
 
 ## Known limitations
 

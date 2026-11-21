@@ -207,6 +207,12 @@ Neither the RPC fallback (`ctx.ui.custom()` returns `undefined` → `askViaDialo
 
 The options-less `ctx.ui.input` path is in-process TUI, so the abort trick should be clean there. It's worth doing in phase 2. Alternatively, route it through `runCustomPrompt` with a small input component, but that's a UI change, so prefer the abort trick.
 
+**Outcome (pi 1.5.2):**
+
+- **Done, TUI only:** the options-less `ctx.ui.input` path (`runInputPrompt`). It parks only when `ctx.mode === "tui"`, where `showExtensionInput` disposes the dialog on abort.
+- **Not parked: RPC.** That covers `askViaDialogs`, `askBatchViaDialogs` and `ui.input` in RPC mode, which stay keyboard-only. pi has no dismiss for a pending `extension_ui_request`. In `rpc-mode.js` `createDialogPromise`, an abort resolves the promise silently and drops the pending id, so a late `extension_ui_response` is ignored. The client keeps a stale dialog, which we confirmed with a real `--mode rpc` run.
+- **Upstream follow-up:** an RPC dismiss/cancel message for a pending `extension_ui_request` on abort would allow RPC parking later.
+
 ## 5. The view (what clients render)
 
 `view` is plain JSON and the contract with every client (herdr-web, CLI, phone). It's versioned through `kind`. Breaking changes need a new kind (e.g. `ask_user.question.v2`); adding fields is fine.

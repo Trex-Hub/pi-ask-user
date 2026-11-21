@@ -25,6 +25,7 @@ High-quality video: [ask-user-demo.mp4](https://github.com/edlsh/pi-ask-user/blo
 - System prompt integration via `promptSnippet` and `promptGuidelines`
 - Optional timeout for auto-dismiss in both overlay and fallback input modes
 - Reports pi's "blocked on user" program status while a prompt is open, plus `herdr:blocked` lifecycle events
+- Answerable from other devices through pi-live (`@dev8-npm/pi-live`) while the terminal prompt stays open; first answer wins
 - Structured response and cancellation `details` for session state reconstruction
 - Graceful fallback when interactive UI is unavailable
 - Bundled `ask-user` skill for mandatory decision-gating in high-stakes or ambiguous tasks
@@ -272,6 +273,45 @@ A batch publishes nothing until the user submits it. Then each answered question
 ```
 
 Set `PI_ASK_USER_EMIT_FULL_EVENTS=true` (or `1`, `yes`, `on`), or `"emitFullEvents": true` in `ask-user.json`, to restore the full payloads — `context`, the offered `options` on cancel, and the complete `response` including selections, comment, and freeform text. Leave it unset unless another extension you trust needs the answer itself; the full response is always available to the agent through the tool result's `details`.
+
+### Answering from other devices (pi-live)
+
+With pi-live (`@dev8-npm/pi-live`) loaded, an open custom prompt (single question or batch, inline or overlay, including while the overlay is hidden) is also offered to pi-live's local socket clients, such as herdr-web, a CLI or a phone. The terminal prompt stays open. Whichever answer comes first wins: a client answer closes the terminal prompt, and a keypress, timeout or abort closes the item for clients. A client answer gives exactly the same tool result, `details`, rendering and `ask:answered` events as answering from the keyboard, so neither the agent nor the transcript can tell the two apart. Without pi-live, or with `PI_LIVE_ENABLED=0`, nothing changes.
+
+`ask_user` talks to pi-live only through pi's event bus (`pi-live:park`) and never imports it. Each prompt is parked with the tool call's id, `owner: "ask_user"`, and a JSON `view` for clients to render:
+
+```jsonc
+// kind "ask_user.question", title: the question
+{
+  "question": "Which color?",
+  "context": "We need a theme for…",          // omitted if none
+  "options": [{ "title": "Green", "description": "Calm" }, { "title": "Blue" }],
+  "allowMultiple": false,
+  "allowFreeform": true,
+  "allowComment": false,
+  "answer": { "kind": "selection | freeform" }  // hint only
+}
+
+// kind "ask_user.batch", title: the heading, or "N questions"
+{
+  "heading": "Setup",                          // omitted if none
+  "allowComment": false,
+  "questions": [{ "question": "…", "context": "…", "options": [], "allowMultiple": false, "allowFreeform": true }]
+}
+```
+
+With a `timeout`, the item also carries `expiresAt` (epoch ms). Clients answer a question with an `AskResponse`, and a batch with `{ answers: BatchAnswer[] }`, one per question in order:
+
+```typescript
+type AskResponse = { kind: "selection"; selections: string[]; comment?: string } | { kind: "freeform"; text: string };
+type BatchAnswer = { status: "answered"; response: AskResponse } | { status: "skipped" };
+```
+
+An answer is accepted only if the keyboard could have given it: selections must be offered option titles, without duplicates and only one unless `allowMultiple`; a `comment` only with `allowComment`; `freeform` only with `allowFreeform` or for a question without options. Text is trimmed, an empty comment is dropped, and selections come back in option order. Any question of a batch may be skipped, all of them included, as on the review page. Anything else is rejected with a short reason such as `option "Purple" not offered` or `expected 3 answers, got 2`, and the prompt stays open.
+
+**Privacy:** the `view` always includes the question's `context` and the option descriptions, whatever `emitFullEvents` says. That setting controls what every installed extension sees on the event bus; the view goes only to pi-live, whose socket is reachable only by your user, and clients can't show the question without it.
+
+Parking covers the custom prompt. The RPC/headless dialogs and the input dialog of a question without options are keyboard-only.
 
 ## Known limitations
 

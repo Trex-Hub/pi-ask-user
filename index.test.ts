@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, mock, onTestFinished, spyOn, tes
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getEventListeners } from "node:events";
+import { EventEmitter, getEventListeners } from "node:events";
 import * as realPiTui from "@earendil-works/pi-tui";
 import type { StringEnumBuilder } from "./index";
 import { NATIVE_COMPONENT, type TernContext, type TernEvent, type TernNode } from "./tern";
@@ -14,6 +14,8 @@ const realPiTuiExports = { ...realPiTui };
 let editorInputs: string[] = [];
 let editorText = "";
 let emittedEvents: Array<{ name: string; payload: any }> = [];
+// The fake pi's bus. Tests stand in for pi-live by listening on it (see fakePiLive).
+let piEvents = new EventEmitter();
 
 let isolatedAgentDir: string;
 let originalAgentDir: string | undefined;
@@ -267,6 +269,7 @@ async function setupTool(): Promise<RegisteredTool> {
    const { default: askUserExtension } = await import("./index");
    let registeredTool: RegisteredTool | undefined;
    emittedEvents = [];
+   piEvents = new EventEmitter();
    const pi = {
       registerTool(tool: RegisteredTool) {
          registeredTool = tool;
@@ -275,7 +278,13 @@ async function setupTool(): Promise<RegisteredTool> {
       on() {},
       events: {
          emit(name: string, payload: any) {
-            emittedEvents.push({ name, payload });
+            // A park is a request to pi-live, not an ask_user event; the parking tests read it from piEvents.
+            if (name !== "pi-live:park") emittedEvents.push({ name, payload });
+            piEvents.emit(name, payload);
+         },
+         on(name: string, handler: (payload: any) => void) {
+            piEvents.on(name, handler);
+            return () => piEvents.off(name, handler);
          },
       },
    } as any;
@@ -4374,5 +4383,410 @@ describe("tool call id on events", () => {
          { active: false, toolCallId: "call_2" },
          { active: false, toolCallId: "call_1" },
       ]);
+   });
+});
+
+describe("pi-live parking", () => {
+   const client = { connId: "conn-1", name: "phone" };
+
+   /** Stands in for pi-live: accepts every park, keeps the request, and records how each one closed. */
+   function fakePiLive() {
+      const parks: any[] = [];
+      const closes: Array<{ id: string; outcome: any }> = [];
+      piEvents.on("pi-live:park", (request: any) => {
+         parks.push(request);
+         request.accept({ close: (outcome: any) => closes.push({ id: request.id, outcome }) });
+      });
+      return { parks, closes };
+   }
+
+   // Mounts the prompt synchronously; keys go to `state.component`, and pi's `done` is counted.
+   function mountPrompt(onOptions?: (options: any) => void) {
+      const state: { component?: any; doneCalls: number } = { doneCalls: 0 };
+      const custom = (factory: any, options: any) => new Promise((resolve) => {
+         onOptions?.(options);
+         state.component = factory(
+            { requestRender() { }, terminal: { rows: 24 } },
+            createTheme(),
+            createKeybindings(),
+            (value: unknown) => {
+               state.doneCalls++;
+               resolve(value);
+            },
+         );
+      });
+      return { state, custom };
+   }
+
+   const press = (component: any, ...keys: string[]) => keys.forEach((key) => component.handleInput(key));
+   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+   const color = { question: "Color?", options: ["Green", "Blue"] };
+   const batch = { questions: [{ question: "Which database?", options: ["Postgres", "SQLite"] }, { question: "Which ORM?", options: ["Drizzle"] }] };
+
+   async function open(params: Record<string, unknown>, signal?: AbortSignal, onOptions?: (options: any) => void) {
+      const tool = await setupTool();
+      const live = fakePiLive();
+      const { state, custom } = mountPrompt(onOptions);
+      const execution = tool.execute("call_park", params, signal, undefined, { hasUI: true, ui: { custom } });
+      return { live, state, execution, park: live.parks[0] };
+   }
+
+   describe("parks the open prompt", () => {
+      test("a single question with its id, kind, title, view and expiry", async () => {
+         const before = Date.now();
+         const { live, state, execution } = await open({
+            question: "Color?",
+            context: " For the theme ",
+            options: [{ title: "Green", description: "Calm" }, "Blue"],
+            allowMultiple: true,
+            allowFreeform: false,
+            timeout: 60_000,
+         });
+         const after = Date.now();
+         expect(live.parks).toHaveLength(1);
+         const { answer, accept, expiresAt, ...park } = live.parks[0];
+         expect(park).toEqual({
+            protocol: 1,
+            id: "call_park",
+            owner: "ask_user",
+            kind: "ask_user.question",
+            title: "Color?",
+            view: {
+               question: "Color?",
+               context: "For the theme",
+               options: [{ title: "Green", description: "Calm" }, { title: "Blue" }],
+               allowMultiple: true,
+               allowFreeform: false,
+               allowComment: false,
+               answer: { kind: "selection | freeform" },
+            },
+         });
+         expect(typeof answer).toBe("function");
+         expect(typeof accept).toBe("function");
+         expect(expiresAt).toBeGreaterThanOrEqual(before + 60_000);
+         expect(expiresAt).toBeLessThanOrEqual(after + 60_000);
+         press(state.component, "escape");
+         await execution;
+      });
+
+      test("a question without context or timeout leaves both out", async () => {
+         const { park, state, execution } = await open(color);
+         expect("expiresAt" in park).toBe(false);
+         expect("context" in park.view).toBe(false);
+         press(state.component, "escape");
+         await execution;
+      });
+
+      test("a batch with its heading as the title, and the batch deadline as the expiry", async () => {
+         const before = Date.now();
+         const { park, state, execution } = await open({
+            question: "Project setup",
+            allowComment: true,
+            timeout: 60_000,
+            questions: [
+               { question: "Which database?", context: "Prod", options: [{ title: "Postgres", description: "Default" }], allowMultiple: true },
+               { question: "Anything else?", allowFreeform: false },
+            ],
+         });
+         expect(park.kind).toBe("ask_user.batch");
+         expect(park.title).toBe("Project setup");
+         expect(park.view).toEqual({
+            heading: "Project setup",
+            allowComment: true,
+            questions: [
+               { question: "Which database?", context: "Prod", options: [{ title: "Postgres", description: "Default" }], allowMultiple: true, allowFreeform: true },
+               { question: "Anything else?", options: [], allowMultiple: false, allowFreeform: false },
+            ],
+         });
+         expect(park.expiresAt).toBeGreaterThanOrEqual(before + 60_000);
+         expect(park.expiresAt).toBeLessThanOrEqual(Date.now() + 60_000);
+         press(state.component, "escape");
+         await execution;
+      });
+
+      test("a batch without a heading is titled by its question count", async () => {
+         const { park, state, execution } = await open(batch);
+         expect(park.title).toBe("2 questions");
+         expect("heading" in park.view).toBe(false);
+         expect("expiresAt" in park).toBe(false);
+         press(state.component, "escape");
+         await execution;
+      });
+   });
+
+   describe("without pi-live", () => {
+      async function keyboardAnswer(listen: () => void) {
+         const tool = await setupTool();
+         listen();
+         const { state, custom } = mountPrompt();
+         const execution = tool.execute("call_park", color, undefined, undefined, { hasUI: true, ui: { custom } });
+         press(state.component, "down", "enter");
+         return { result: await execution, events: emittedEvents };
+      }
+
+      test("nothing listening, or a listener that does not accept, leaves the prompt and its result unchanged", async () => {
+         const plain = await keyboardAnswer(() => { });
+         const parks: any[] = [];
+         const declined = await keyboardAnswer(() => piEvents.on("pi-live:park", (request: any) => parks.push(request)));
+         expect(parks).toHaveLength(1);
+         expect(declined).toEqual(plain);
+         expect(plain.result.content).toEqual([{ type: "text", text: "User answered: Blue" }]);
+      });
+   });
+
+   describe("a client answer gives the keyboard's result", () => {
+      async function keyboardRun(params: Record<string, unknown>, keys: (component: any) => void) {
+         const tool = await setupTool();
+         const { state, custom } = mountPrompt();
+         const execution = tool.execute("call_park", params, undefined, undefined, { hasUI: true, ui: { custom } });
+         keys(state.component);
+         return { result: await execution, events: emittedEvents };
+      }
+
+      async function clientRun(params: Record<string, unknown>, raw: unknown) {
+         const { live, park, state, execution } = await open(params);
+         expect(park.answer(raw, client)).toEqual({ status: "delivered" });
+         const result = await execution;
+         expect(state.doneCalls).toBe(1);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "client", client } }]);
+         return { result, events: emittedEvents };
+      }
+
+      const cases: Array<{ name: string; params: Record<string, unknown>; keys: (component: any) => void; answer: unknown }> = [
+         {
+            name: "single choice",
+            params: color,
+            keys: (component) => press(component, "down", "enter"),
+            answer: { kind: "selection", selections: [" Blue "] },
+         },
+         {
+            name: "multiple choice, in option order",
+            params: { question: "Which?", options: ["Alpha", "Beta", "Gamma"], allowMultiple: true },
+            keys: (component) => press(component, "space", "down", "down", "space", "enter"),
+            answer: { kind: "selection", selections: ["Gamma", "Alpha"] },
+         },
+         {
+            name: "freeform",
+            params: { question: "Which?", options: ["Alpha", "Beta"] },
+            keys: (component) => {
+               press(component, "z", "z", "z", "enter");
+               editorText = "custom from editor";
+               press(component, "enter");
+            },
+            answer: { kind: "freeform", text: "  custom from editor " },
+         },
+         {
+            name: "choice plus comment",
+            params: { question: "Which?", options: ["Alpha", "Beta"], allowComment: true },
+            keys: (component) => {
+               press(component, "ctrl+g", "enter");
+               editorText = "Needs audit logging.";
+               press(component, "enter");
+            },
+            answer: { kind: "selection", selections: ["Alpha"], comment: " Needs audit logging. ", extra: "ignored" },
+         },
+         {
+            name: "choice with an empty comment",
+            params: { question: "Which?", options: ["Alpha", "Beta"], allowComment: true },
+            keys: (component) => press(component, "enter"),
+            answer: { kind: "selection", selections: ["Alpha"], comment: "  " },
+         },
+         {
+            name: "batch with a skip",
+            params: batch,
+            keys: (component) => press(component, "down", "enter", "tab", "enter", "enter"),
+            answer: { answers: [{ status: "answered", response: { kind: "selection", selections: ["SQLite"] } }, { status: "skipped" }] },
+         },
+         {
+            name: "batch with every question skipped",
+            params: batch,
+            keys: (component) => press(component, "tab", "tab", "enter", "enter"),
+            answer: { answers: [{ status: "skipped" }, { status: "skipped" }] },
+         },
+         {
+            name: "batch with text for a question without options",
+            params: { questions: [{ question: "Which database?", options: ["Postgres"] }, { question: "Anything else?", allowFreeform: false }] },
+            keys: (component) => {
+               press(component, "enter");
+               editorText = "No";
+               press(component, "enter", "enter");
+            },
+            answer: { answers: [{ status: "answered", response: { kind: "selection", selections: ["Postgres"] } }, { status: "answered", response: { kind: "freeform", text: "No" } }] },
+         },
+      ];
+
+      for (const { name, params, keys, answer } of cases) {
+         test(name, async () => {
+            const keyboard = await keyboardRun(params, keys);
+            const parked = await clientRun(params, answer);
+            expect(parked.result.details.cancelled).toBe(false);
+            expect(parked.result).toEqual(keyboard.result);
+            expect(parked.events).toEqual(keyboard.events);
+         });
+      }
+   });
+
+   describe("rejects an answer the prompt could not produce, and stays open", () => {
+      const cases: Array<{ name: string; params: Record<string, unknown>; answer: unknown; reason: string }> = [
+         { name: "an option not offered", params: color, answer: { kind: "selection", selections: ["Purple"] }, reason: "option \"Purple\" not offered" },
+         { name: "two selections when single", params: color, answer: { kind: "selection", selections: ["Green", "Blue"] }, reason: "only one selection allowed" },
+         { name: "the same option twice", params: { ...color, allowMultiple: true }, answer: { kind: "selection", selections: ["Green", "Green"] }, reason: "option \"Green\" selected twice" },
+         { name: "freeform when not allowed", params: { ...color, allowFreeform: false }, answer: { kind: "freeform", text: "Teal" }, reason: "freeform not allowed" },
+         { name: "blank freeform", params: color, answer: { kind: "freeform", text: "  " }, reason: "text must be a non-empty string" },
+         { name: "a comment when not allowed", params: color, answer: { kind: "selection", selections: ["Green"], comment: "why" }, reason: "comment not allowed" },
+         { name: "a comment that is not a string", params: { ...color, allowComment: true }, answer: { kind: "selection", selections: ["Green"], comment: 3 }, reason: "comment must be a string" },
+         { name: "empty selections", params: color, answer: { kind: "selection", selections: [] }, reason: "selections must be a non-empty array of strings" },
+         { name: "an unknown kind", params: color, answer: { kind: "vote" }, reason: "kind must be \"selection\" or \"freeform\"" },
+         { name: "a bare string", params: color, answer: "Green", reason: "expected an object with kind \"selection\" or \"freeform\"" },
+         { name: "null", params: color, answer: null, reason: "expected an object with kind \"selection\" or \"freeform\"" },
+         { name: "a wrong batch size", params: batch, answer: { answers: [{ status: "skipped" }] }, reason: "expected 2 answers, got 1" },
+         { name: "a batch without answers", params: batch, answer: [{ status: "skipped" }], reason: "expected an object with an answers array" },
+         { name: "a bad batch status", params: batch, answer: { answers: [{ status: "skipped" }, { status: "maybe" }] }, reason: "answer 2: status must be \"answered\" or \"skipped\"" },
+         {
+            name: "a bad batch response",
+            params: batch,
+            answer: { answers: [{ status: "answered", response: { kind: "selection", selections: ["MySQL"] } }, { status: "skipped" }] },
+            reason: "answer 1: option \"MySQL\" not offered",
+         },
+         {
+            name: "a batch comment when not allowed",
+            params: batch,
+            answer: { answers: [{ status: "answered", response: { kind: "selection", selections: ["Postgres"], comment: "x" } }, { status: "skipped" }] },
+            reason: "answer 1: comment not allowed",
+         },
+      ];
+
+      for (const { name, params, answer, reason } of cases) {
+         test(name, async () => {
+            const { live, park, state, execution } = await open(params);
+            expect(park.answer(answer, client)).toEqual({ status: "invalid", reason });
+            expect(state.doneCalls).toBe(0);
+            expect(live.closes).toEqual([]);
+            press(state.component, "enter");
+            if (params === batch) press(state.component, "enter", "enter");
+            const result = await execution;
+            expect(result.details.cancelled).toBe(false);
+            expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "keyboard" } }]);
+         });
+      }
+   });
+
+   describe("resolves once, and closes the ticket once", () => {
+      test("client answer, then the timeout", async () => {
+         const { live, park, state, execution } = await open({ ...color, timeout: 20 });
+         expect(park.answer({ kind: "selection", selections: ["Blue"] }, client)).toEqual({ status: "delivered" });
+         const result = await execution;
+         await sleep(40);
+         expect(result.content).toEqual([{ type: "text", text: "User answered: Blue" }]);
+         expect(state.doneCalls).toBe(1);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "client", client } }]);
+      });
+
+      test("abort, then a client answer is not open", async () => {
+         const controller = new AbortController();
+         const { live, park, execution } = await open(color, controller.signal);
+         controller.abort();
+         expect(park.answer({ kind: "selection", selections: ["Blue"] }, client)).toEqual({ status: "invalid", reason: "not open" });
+         const result = await execution;
+         expect(result.details.cancelled).toBe(true);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "abort" } }]);
+      });
+
+      test("keypress, then a client answer is not open", async () => {
+         const { live, park, state, execution } = await open(color);
+         press(state.component, "enter");
+         expect(park.answer({ kind: "selection", selections: ["Blue"] }, client)).toEqual({ status: "invalid", reason: "not open" });
+         const result = await execution;
+         expect(result.content).toEqual([{ type: "text", text: "User answered: Green" }]);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "keyboard" } }]);
+      });
+
+      test("client answer, then a keypress is ignored", async () => {
+         const { live, park, state, execution } = await open(color);
+         expect(park.answer({ kind: "selection", selections: ["Blue"] }, client)).toEqual({ status: "delivered" });
+         press(state.component, "enter");
+         const result = await execution;
+         expect(result.content).toEqual([{ type: "text", text: "User answered: Blue" }]);
+         expect(state.doneCalls).toBe(1);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "client", client } }]);
+      });
+
+      test("a cancel from the keyboard closes as keyboard", async () => {
+         const { live, state, execution } = await open(color);
+         press(state.component, "escape");
+         expect((await execution).details.cancelled).toBe(true);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "keyboard" } }]);
+      });
+
+      test("the timeout closes as timeout", async () => {
+         const { live, execution } = await open({ ...color, timeout: 10 });
+         expect((await execution).details.cancelled).toBe(true);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "timeout" } }]);
+      });
+
+      test("a failing prompt closes as error", async () => {
+         const tool = await setupTool();
+         const live = fakePiLive();
+         const custom = async (factory: any) => {
+            factory({ requestRender() { }, terminal: { rows: 24 } }, createTheme(), createKeybindings(), () => { });
+            throw new Error("render failed");
+         };
+         const error = await rejectedError(tool.execute("call_park", color, undefined, undefined, { hasUI: true, ui: { custom } }));
+         expect(error.message).toBe("render failed");
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "error" } }]);
+      });
+
+      test("the batch deadline closes as timeout", async () => {
+         const { live, execution } = await open({ ...batch, timeout: 10 });
+         expect((await execution).details.cancelled).toBe(true);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "timeout" } }]);
+      });
+
+      test("an outer abort of a batch closes as abort, even with a TimeoutError reason", async () => {
+         const controller = new AbortController();
+         const { live, execution } = await open({ ...batch, timeout: 60_000 }, controller.signal);
+         controller.abort(new DOMException("pi gave up", "TimeoutError"));
+         expect((await execution).details.cancelled).toBe(true);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "abort" } }]);
+      });
+
+      test("an outer abort of a single question with a TimeoutError reason closes as abort", async () => {
+         const controller = new AbortController();
+         const { live, execution } = await open(color, controller.signal);
+         controller.abort(new DOMException("pi gave up", "TimeoutError"));
+         expect((await execution).details.cancelled).toBe(true);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "abort" } }]);
+      });
+   });
+
+   test("an answer while the overlay is hidden resolves it and tears it down", async () => {
+      const tool = await setupTool();
+      const live = fakePiLive();
+      let hidden = false;
+      let inputHandler: ((data: string) => any) | undefined;
+      let unsubscribed = false;
+      const { state, custom } = mountPrompt((options) => options.onHandle({
+         setHidden: (value: boolean) => { hidden = value; },
+         isHidden: () => hidden,
+      }));
+      const execution = tool.execute("call_park", { ...color, displayMode: "overlay" }, undefined, undefined, {
+         hasUI: true,
+         ui: {
+            custom,
+            onTerminalInput: (handler: (data: string) => any) => {
+               inputHandler = handler;
+               return () => { unsubscribed = true; };
+            },
+            notify: () => { },
+         },
+      });
+      inputHandler?.("\x1b[111;3:1u");
+      expect(hidden).toBe(true);
+      expect(live.parks[0].answer({ kind: "selection", selections: ["Blue"] }, client)).toEqual({ status: "delivered" });
+      const result = await execution;
+      expect(result.content).toEqual([{ type: "text", text: "User answered: Blue" }]);
+      expect(state.doneCalls).toBe(1);
+      expect(unsubscribed).toBe(true);
+      expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "client", client } }]);
    });
 });

@@ -188,7 +188,7 @@ type BatchAnswer = { status: "answered"; response: AskResponse } | { status: "sk
 
 1. `answers.length === questions.length`.
 2. Each `answered` entry passes the single-question rules against its own question's `options`, `allowMultiple` and `allowFreeform`, plus the batch's `allowComment`.
-3. `skipped` is allowed for any entry, because the keyboard review page allows skipping. At least one entry must be `answered`, matching what the review page lets you submit. Verify that against `BatchAskComponent` while implementing, and copy the keyboard's rule exactly.
+3. `skipped` is allowed for any entry, because the keyboard review page allows skipping. All entries may be skipped. `BatchAskComponent.submitReview()` lets you submit with everything skipped after a second Enter confirms the skips ("User answered 0 of N questions"), so a client may do the same.
 
 Reasons are short and readable, for example `option "Purple" not offered`, `only one selection allowed`, `freeform not allowed`, `comment not allowed`, `expected 3 answers, got 2`. pi-live passes them to the client unchanged.
 
@@ -347,6 +347,7 @@ Then confirm:
 ## 12. Open questions
 
 - Whether upstream wants C at all, or only A and B. Our fork works either way.
-- The batch "at least one answered" rule must be copied from `BatchAskComponent`, not assumed (§4.5).
+- ~~The batch "at least one answered" rule~~: resolved. The keyboard allows all-skipped, and so does `parse` (§4.5).
+- Batch timeout: `executeBatch` keeps its single deadline timer. `park.expiresAt` is optional and takes the batch deadline. The deadline aborts with its own TimeoutError, so the close reports `timeout`, while an outer abort still reports `abort`.
 - Whether herdr-web should show "answered from <client>" in the terminal. v1: no (§4.4).
 - Header chip, "chat about this" and ranking (ideas from Claude's AskUserQuestion) are out of scope here, but the view format leaves room for them as new fields.

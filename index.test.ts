@@ -531,7 +531,7 @@ describe("ask_user", () => {
          },
       );
 
-      expect(capturedOptions).toBeUndefined();
+      expect(capturedOptions).toEqual({ blocked: { kind: "question", message: "Which option should we use?" } });
       expect(result.details.cancelled).toBe(true);
    });
 
@@ -625,7 +625,7 @@ describe("ask_user", () => {
          },
       );
 
-      expect(capturedOptions).toBeUndefined();
+      expect(capturedOptions.overlay).toBeUndefined();
    });
 
    test("normalizes PI_ASK_USER_DISPLAY_MODE before applying it", async () => {
@@ -649,7 +649,7 @@ describe("ask_user", () => {
          },
       );
 
-      expect(capturedOptions).toBeUndefined();
+      expect((capturedOptions as { overlay?: boolean }).overlay).toBeUndefined();
    });
 
    test("call-level displayMode overrides PI_ASK_USER_DISPLAY_MODE env var", async () => {
@@ -3989,14 +3989,14 @@ test("top-level single-question fields sent with questions are ignored (#88)", a
       test("uses ask-user.json displayMode when the env var and call-level value are unset", async () => {
          stubSettingsFile(JSON.stringify({ displayMode: "inline" }));
          const capturedOptions = await executeWithCapturedOptions({});
-         expect(capturedOptions).toBeUndefined();
+         expect(capturedOptions.overlay).toBeUndefined();
       });
 
       test("PI_ASK_USER_DISPLAY_MODE env var overrides ask-user.json", async () => {
          stubSettingsFile(JSON.stringify({ displayMode: "overlay" }));
          stubEnv("PI_ASK_USER_DISPLAY_MODE", "inline");
          const capturedOptions = await executeWithCapturedOptions({});
-         expect(capturedOptions).toBeUndefined();
+         expect(capturedOptions.overlay).toBeUndefined();
       });
 
       test("call-level displayMode overrides ask-user.json", async () => {
@@ -4252,5 +4252,52 @@ describe("Tern native presentation", () => {
          expect(headingOf()).toBe(JSON.stringify([{ t: "Project setup" }]));
          present(component).fire({ ev: "action", act: "submit" });
       });
+   });
+});
+
+describe("Needs You (blocked program status)", () => {
+   async function capturedCustomOptions(params: Record<string, unknown>) {
+      const tool = await setupTool();
+      let capturedOptions: any;
+      await tool.execute("tool-call-id", params, undefined, undefined, {
+         hasUI: true,
+         ui: {
+            custom: async (_factory: any, options: any) => {
+               capturedOptions = options;
+               return null;
+            },
+         },
+      });
+      return capturedOptions;
+   }
+
+   const batch = { questions: [{ question: "Which database?", options: ["Postgres"] }, { question: "Which ORM?" }] };
+
+   for (const displayMode of ["inline", "overlay"] as const) {
+      test(`a single question reports blocked with its text in ${displayMode} mode`, async () => {
+         const options = await capturedCustomOptions({ question: "Which color?", options: ["Green", "Blue"], displayMode });
+         expect(options.blocked).toEqual({ kind: "question", message: "Which color?" });
+         expect(options.overlay).toBe(displayMode === "overlay" ? true : undefined);
+      });
+
+      test(`a batch reports blocked with its heading in ${displayMode} mode`, async () => {
+         const options = await capturedCustomOptions({ ...batch, question: "Project setup\nChoose defaults", displayMode });
+         expect(options.blocked).toEqual({ kind: "question", message: "Project setup Choose defaults" });
+         expect(options.overlay).toBe(displayMode === "overlay" ? true : undefined);
+      });
+
+      test(`a batch without a heading reports its question count in ${displayMode} mode`, async () => {
+         const options = await capturedCustomOptions({ ...batch, displayMode });
+         expect(options.blocked).toEqual({ kind: "question", message: "2 questions" });
+      });
+   }
+
+   test("a long question is cut to one short line", async () => {
+      const question = `Should we ${"really ".repeat(20)}\n\nship it?`;
+      const options = await capturedCustomOptions({ question, options: ["Yes", "No"] });
+      expect(options.blocked.message).toHaveLength(80);
+      expect(options.blocked.message).toStartWith("Should we really really");
+      expect(options.blocked.message).toEndWith("…");
+      expect(options.blocked.message).not.toContain("\n");
    });
 });

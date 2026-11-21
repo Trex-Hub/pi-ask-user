@@ -517,13 +517,35 @@ function matchesSelectDown(data: string, keybindings: KeybindingsManager): boole
    );
 }
 
+const BLOCKED_MESSAGE_MAX_LENGTH = 80;
+
+/** What pi reports while ask_user waits ("Needs You"): the question or batch heading, on one short line. */
+function blockedMessage(text: string): string {
+   const line = text.replace(/\s+/g, " ").trim();
+   return line.length > BLOCKED_MESSAGE_MAX_LENGTH ? `${line.slice(0, BLOCKED_MESSAGE_MAX_LENGTH - 1)}…` : line;
+}
+
+interface AskBlockedStatus {
+   kind: "question";
+   message: string;
+}
+
+// `blocked` makes pi report the session as waiting on the user (OSC 7501
+// program status, shown as "Needs You" by herdr) for as long as the prompt is
+// open, including while the overlay is hidden. Older hosts ignore the option.
 function buildCustomUIOptions(
    displayMode: AskDisplayMode,
+   blocked: AskBlockedStatus,
    onHandle?: (handle: OverlayHandle) => void,
-): { overlay?: boolean; overlayOptions?: OverlayOptions; onHandle?: (handle: OverlayHandle) => void } | undefined {
+): {
+   overlay?: boolean;
+   overlayOptions?: OverlayOptions;
+   onHandle?: (handle: OverlayHandle) => void;
+   blocked: AskBlockedStatus;
+} {
    switch (displayMode) {
       case "inline":
-         return undefined;
+         return { blocked };
       case "overlay":
          return {
             overlay: true,
@@ -534,6 +556,7 @@ function buildCustomUIOptions(
                maxHeight: "85%",
                margin: 1,
             },
+            blocked,
             ...(onHandle ? { onHandle } : {}),
          };
       default: {
@@ -548,6 +571,7 @@ function buildCustomUIOptions(
                maxHeight: "85%",
                margin: 1,
             },
+            blocked,
             ...(onHandle ? { onHandle } : {}),
          };
       }
@@ -2667,13 +2691,161 @@ function resolvePromptSettings(params: AskParams): PromptSettings {
 }
 
 /** Report the session as blocked on the user (`herdr:blocked`) for the duration of `run`. */
-async function whileBlocked<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
-   pi.events.emit("herdr:blocked", { active: true, label: "Waiting for user response" });
+async function whileBlocked<T>(pi: ExtensionAPI, toolCallId: string, run: () => Promise<T>): Promise<T> {
+   pi.events.emit("herdr:blocked", { active: true, label: "Waiting for user response", toolCallId });
    try {
       return await run();
    } finally {
-      pi.events.emit("herdr:blocked", { active: false });
+      pi.events.emit("herdr:blocked", { active: false, toolCallId });
    }
+}
+
+// pi-live (a companion extension) holds a user-only socket that other UIs,
+// such as a web page or a phone, use to answer prompts. We talk to it only
+// through pi.events: an open prompt is offered on "pi-live:park", and if
+// nothing accepts it the prompt stays keyboard-only. These mirror pi-live's
+// bus types (protocol 1); it is never imported.
+interface PiLiveClient {
+   connId: string;
+   name: string;
+}
+
+type PiLiveCloseOutcome = {
+   by: "keyboard" | "client" | "timeout" | "abort" | "error";
+   client?: PiLiveClient;
+};
+
+interface PiLiveTicket {
+   close(outcome: PiLiveCloseOutcome): void;
+}
+
+type ParkParse<T> = { ok: true; value: T } | { ok: false; reason: string };
+
+interface PromptPark<T> {
+   /** The toolCallId. */
+   id: string;
+   kind: "ask_user.question" | "ask_user.batch";
+   title: string;
+   /** What clients render; see docs/architecture.md §5. */
+   view: unknown;
+   /** Epoch ms the prompt gives up at, when its deadline is not the request's timeout (a batch). */
+   expiresAt?: number;
+   /** Validate a raw client answer against this prompt's params. */
+   parse: (raw: unknown) => ParkParse<T>;
+}
+
+/** Abort reason of a batch deadline, so the park closes as a timeout rather than an abort. */
+const ASK_TIMED_OUT = new DOMException("ask_user timed out", "TimeoutError");
+
+const invalidAnswer = (reason: string): { ok: false; reason: string } => ({ ok: false, reason });
+
+/**
+ * Turn a raw client answer into exactly the response the keyboard would
+ * produce for this question, or say why not. Selections come back in option
+ * order, as the keyboard submits them.
+ */
+function parseAskResponse(
+   raw: unknown,
+   entry: Pick<BatchQuestion, "options" | "allowMultiple" | "allowFreeform">,
+   allowComment: boolean,
+): ParkParse<AskResponse> {
+   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return invalidAnswer("expected an object with kind \"selection\" or \"freeform\"");
+   }
+   const answer = raw as Record<string, unknown>;
+   if (answer.kind === "selection") {
+      const { selections, comment } = answer;
+      if (!Array.isArray(selections) || selections.length === 0 || !selections.every((s) => typeof s === "string")) {
+         return invalidAnswer("selections must be a non-empty array of strings");
+      }
+      const indices: number[] = [];
+      for (const selection of selections as string[]) {
+         const index = entry.options.findIndex((option) => option.title === selection.trim());
+         if (index < 0) return invalidAnswer(`option "${selection}" not offered`);
+         if (indices.includes(index)) return invalidAnswer(`option "${selection}" selected twice`);
+         indices.push(index);
+      }
+      if (!entry.allowMultiple && indices.length > 1) return invalidAnswer("only one selection allowed");
+      if (comment != null) {
+         if (!allowComment) return invalidAnswer("comment not allowed");
+         if (typeof comment !== "string") return invalidAnswer("comment must be a string");
+      }
+      const titles = indices.sort((a, b) => a - b).map((index) => entry.options[index]!.title);
+      const response = createSelectionResponse(titles, comment as string | undefined);
+      return response ? { ok: true, value: response } : invalidAnswer("selections must be a non-empty array of strings");
+   }
+   if (answer.kind === "freeform") {
+      // A question without options is answered in the editor, whatever allowFreeform says.
+      if (!entry.allowFreeform && entry.options.length > 0) return invalidAnswer("freeform not allowed");
+      const response = typeof answer.text === "string" ? createFreeformResponse(answer.text) : null;
+      return response ? { ok: true, value: response } : invalidAnswer("text must be a non-empty string");
+   }
+   return invalidAnswer("kind must be \"selection\" or \"freeform\"");
+}
+
+/**
+ * Batch answers, index-aligned with the questions. Skips are allowed for any
+ * entry, all of them included, as the review page submits after confirming.
+ */
+function parseBatchAnswers(raw: unknown, questions: BatchQuestion[], allowComment: boolean): ParkParse<BatchAnswer[]> {
+   const answers = raw && typeof raw === "object" ? (raw as Record<string, unknown>).answers : undefined;
+   if (!Array.isArray(answers)) return invalidAnswer("expected an object with an answers array");
+   if (answers.length !== questions.length) {
+      return invalidAnswer(`expected ${questions.length} answers, got ${answers.length}`);
+   }
+   const value: BatchAnswer[] = [];
+   for (const [index, answer] of answers.entries()) {
+      const status = answer && typeof answer === "object" ? (answer as Record<string, unknown>).status : undefined;
+      if (status === "skipped") {
+         value.push({ status: "skipped" });
+      } else if (status === "answered") {
+         const parsed = parseAskResponse((answer as Record<string, unknown>).response, questions[index]!, allowComment);
+         if (!parsed.ok) return invalidAnswer(`answer ${index + 1}: ${parsed.reason}`);
+         value.push({ status: "answered", response: parsed.value });
+      } else {
+         return invalidAnswer(`answer ${index + 1}: status must be "answered" or "skipped"`);
+      }
+   }
+   return { ok: true, value };
+}
+
+function viewOptions(options: QuestionOption[]): QuestionOption[] {
+   return options.map(({ title, description }) => (description ? { title, description } : { title }));
+}
+
+/** The `ask_user.question` view clients render. */
+function questionView(
+   question: string,
+   context: string | undefined,
+   options: QuestionOption[],
+   allowMultiple: boolean,
+   allowFreeform: boolean,
+   allowComment: boolean,
+) {
+   return {
+      question,
+      ...(context ? { context } : {}),
+      options: viewOptions(options),
+      allowMultiple,
+      allowFreeform,
+      allowComment,
+      answer: { kind: "selection | freeform" },
+   };
+}
+
+/** The `ask_user.batch` view clients render. */
+function batchView(questions: BatchQuestion[], allowComment: boolean, heading: string | undefined) {
+   return {
+      ...(heading ? { heading } : {}),
+      allowComment,
+      questions: questions.map((entry) => ({
+         question: entry.question,
+         ...(entry.context ? { context: entry.context } : {}),
+         options: viewOptions(entry.options),
+         allowMultiple: entry.allowMultiple,
+         allowFreeform: entry.allowFreeform,
+      })),
+   };
 }
 
 interface CustomPromptRequest<T> {
@@ -2681,6 +2853,8 @@ interface CustomPromptRequest<T> {
    timeout?: number;
    displayMode: AskDisplayMode;
    overlayToggle: ResolvedShortcut;
+   /** Short text pi reports while the prompt waits on the user (see buildCustomUIOptions). */
+   blockedMessage: string;
    createComponent: (
       tui: TUI,
       theme: Theme,
@@ -2689,15 +2863,19 @@ interface CustomPromptRequest<T> {
    ) => Component;
    /** RPC/headless mode: ctx.ui.custom() returns undefined, so degrade to the select()/input() dialogs. */
    fallback: () => Promise<T | null>;
+   /** Offer this prompt to pi-live clients. Omitted = keyboard only. */
+   park?: PromptPark<T>;
 }
 
 /**
  * Show one custom-UI prompt and own every resource it needs: the abort
  * listener, the timeout timer, and the overlay-toggle terminal listener.
  * Completion is guarded so a late timer, abort, or keypress cannot resolve
- * twice, and every resource is released however the prompt ends.
+ * twice, and every resource is released however the prompt ends. With
+ * `park`, the open prompt is also offered to pi-live clients; a valid client
+ * answer completes it through the same guard as a keypress.
  */
-async function runCustomPrompt<T>(ui: ExtensionUIContext, request: CustomPromptRequest<T>): Promise<T | null> {
+async function runCustomPrompt<T>(pi: ExtensionAPI, ui: ExtensionUIContext, request: CustomPromptRequest<T>): Promise<T | null> {
    const { signal, timeout, displayMode, overlayToggle } = request;
    let overlayHandle: OverlayHandle | undefined;
    let removeOverlayInputListener: (() => void) | undefined;
@@ -2705,25 +2883,55 @@ async function runCustomPrompt<T>(ui: ExtensionUIContext, request: CustomPromptR
    let onCustomAbort: (() => void) | undefined;
    let customCompleted = false;
    let hasAnnouncedHide = false;
+   let ticket: PiLiveTicket | undefined;
+   let closedBy: PiLiveCloseOutcome = { by: "error" };
    try {
       const customFactory = (tui: TUI, theme: Theme, keybindings: KeybindingsManager, done: (result: T | null) => void) => {
-         const complete = (value: T | null) => {
+         // Without an outcome, the prompt was answered or cancelled from the keyboard.
+         const complete = (value: T | null, outcome: PiLiveCloseOutcome = { by: "keyboard" }) => {
             if (customCompleted) return;
             customCompleted = true;
+            closedBy = outcome;
             done(signal?.aborted ? null : value);
          };
+         const abortOutcome = (): PiLiveCloseOutcome => ({ by: signal?.reason === ASK_TIMED_OUT ? "timeout" : "abort" });
          if (signal) {
-            onCustomAbort = () => complete(null);
+            onCustomAbort = () => complete(null, abortOutcome());
             signal.addEventListener("abort", onCustomAbort, { once: true });
          }
 
          if (signal?.aborted) {
-            complete(null);
+            complete(null, abortOutcome());
          } else if (timeout && timeout > 0) {
-            customTimer = setTimeout(() => complete(null), timeout);
+            customTimer = setTimeout(() => complete(null, { by: "timeout" }), timeout);
          }
 
-         return request.createComponent(tui, theme, keybindings, complete);
+         const park = request.park;
+         if (park && !customCompleted) {
+            const expiresAt = park.expiresAt ?? (timeout && timeout > 0 ? Date.now() + timeout : undefined);
+            // emit is synchronous: pi-live accepts during it, or isn't there.
+            pi.events.emit("pi-live:park", {
+               protocol: 1,
+               id: park.id,
+               owner: "ask_user",
+               kind: park.kind,
+               title: park.title,
+               view: park.view,
+               ...(expiresAt !== undefined ? { expiresAt } : {}),
+               answer: (raw: unknown, from: PiLiveClient) => {
+                  if (customCompleted) return { status: "invalid", reason: "not open" };
+                  const parsed = park.parse(raw);
+                  if (!parsed.ok) return { status: "invalid", reason: parsed.reason };
+                  complete(parsed.value, { by: "client", client: from });
+                  return { status: "delivered" };
+               },
+               accept: (accepted: PiLiveTicket) => {
+                  ticket = accepted;
+               },
+            });
+         }
+
+         return request.createComponent(tui, theme, keybindings, (value) => complete(value));
       };
 
       // Register a raw terminal input listener for the overlay-toggle key so the
@@ -2755,7 +2963,7 @@ async function runCustomPrompt<T>(ui: ExtensionUIContext, request: CustomPromptR
 
       const customResult = signal?.aborted ? null : await ui.custom<T | null>(
          customFactory,
-         buildCustomUIOptions(displayMode, (handle) => {
+         buildCustomUIOptions(displayMode, { kind: "question", message: blockedMessage(request.blockedMessage) }, (handle) => {
             overlayHandle = handle;
          }),
       );
@@ -2770,6 +2978,74 @@ async function runCustomPrompt<T>(ui: ExtensionUIContext, request: CustomPromptR
       if (customTimer !== undefined) clearTimeout(customTimer);
       if (onCustomAbort) signal?.removeEventListener("abort", onCustomAbort);
       removeOverlayInputListener?.();
+      ticket?.close(closedBy);
+   }
+}
+
+/**
+ * pi's input dialog for a question without options. With `park`, it is also
+ * offered to pi-live clients. We don't own that dialog's complete(), so a
+ * valid client answer is kept and closes the dialog by aborting a signal
+ * linked to the tool's; an abort of the tool's own signal is still a cancel.
+ * Park only in the TUI: in RPC mode an aborted dialog stays open in the client.
+ */
+async function runInputPrompt(
+   pi: ExtensionAPI,
+   ui: ExtensionUIContext,
+   prompt: string,
+   dialogOpts: DialogOptions | undefined,
+   park?: PromptPark<AskResponse>,
+): Promise<AskResponse | null> {
+   const signal = dialogOpts?.signal;
+   const timeout = dialogOpts?.timeout;
+   const linked = new AbortController();
+   let ticket: PiLiveTicket | undefined;
+   // The first of keyboard, client, timeout or abort to end the wait.
+   let closedBy: PiLiveCloseOutcome | undefined;
+   let clientAnswer: AskResponse | undefined;
+   const onAbort = () => {
+      closedBy ??= { by: "abort" };
+      linked.abort();
+   };
+   // Set up before the dialog's own timer with the same delay, so it fires first.
+   const timer = timeout && timeout > 0 ? setTimeout(() => { closedBy ??= { by: "timeout" }; }, timeout) : undefined;
+   signal?.addEventListener("abort", onAbort, { once: true });
+   try {
+      if (park && !signal?.aborted) {
+         pi.events.emit("pi-live:park", {
+            protocol: 1,
+            id: park.id,
+            owner: "ask_user",
+            kind: park.kind,
+            title: park.title,
+            view: park.view,
+            ...(timeout && timeout > 0 ? { expiresAt: Date.now() + timeout } : {}),
+            answer: (raw: unknown, from: PiLiveClient) => {
+               if (closedBy || linked.signal.aborted) return { status: "invalid", reason: "not open" };
+               const parsed = park.parse(raw);
+               if (!parsed.ok) return { status: "invalid", reason: parsed.reason };
+               closedBy = { by: "client", client: from };
+               clientAnswer = parsed.value;
+               linked.abort();
+               return { status: "delivered" };
+            },
+            accept: (accepted: PiLiveTicket) => {
+               ticket = accepted;
+            },
+         });
+      }
+
+      const answer = await ui.input(prompt, "Type your answer...", { ...dialogOpts, signal: linked.signal });
+      closedBy ??= { by: "keyboard" };
+      if (signal?.aborted) return null;
+      return clientAnswer ?? createFreeformResponse(answer);
+   } catch (error) {
+      closedBy = { by: "error" };
+      throw error;
+   } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      ticket?.close(closedBy ?? { by: "error" });
    }
 }
 
@@ -2845,11 +3121,12 @@ interface BatchPosition {
    total: number;
 }
 
-function createAskEventEmitter(pi: ExtensionAPI) {
+function createAskEventEmitter(pi: ExtensionAPI, toolCallId: string) {
    // Every installed extension receives these events. By default only the
    // question and the response kind are broadcast; the context and the
    // user's actual selections/comment/freeform text stay inside the tool
-   // result unless the user opts in (#51).
+   // result unless the user opts in (#51). The tool call id is always
+   // included so listeners can tell apart two calls asking the same question.
    const emitFullEvents = parseBooleanPreference(process.env.PI_ASK_USER_EMIT_FULL_EVENTS)
       ?? loadAskUserSettings().emitFullEvents
       ?? false;
@@ -2859,8 +3136,8 @@ function createAskEventEmitter(pi: ExtensionAPI) {
          pi.events.emit(
             "ask:answered",
             emitFullEvents
-               ? { question: subject.question, context: subject.context, response, ...position }
-               : { question: subject.question, response: { kind: response.kind }, ...position },
+               ? { question: subject.question, context: subject.context, response, ...position, toolCallId }
+               : { question: subject.question, response: { kind: response.kind }, ...position, toolCallId },
          );
       },
       cancelled(subject: AskEventSubject, batch?: BatchPosition): void {
@@ -2868,8 +3145,8 @@ function createAskEventEmitter(pi: ExtensionAPI) {
          pi.events.emit(
             "ask:cancelled",
             emitFullEvents
-               ? { question: subject.question, context: subject.context, options: subject.options, ...position }
-               : { question: subject.question, ...position },
+               ? { question: subject.question, context: subject.context, options: subject.options, ...position, toolCallId }
+               : { question: subject.question, ...position, toolCallId },
          );
       },
    };
@@ -2904,6 +3181,7 @@ function formatBatchForMessage(questions: BatchQuestion[], allowComment: boolean
 
 async function executeBatch(
    pi: ExtensionAPI,
+   toolCallId: string,
    params: AskParams,
    signal: AbortSignal | undefined,
    onUpdate: AgentToolUpdateCallback<AskBatchDetails> | undefined,
@@ -2912,7 +3190,7 @@ async function executeBatch(
    const questions = normalizeBatchQuestions(params);
    const heading = batchHeading(params);
    const settings = resolvePromptSettings(params);
-   const events = createAskEventEmitter(pi);
+   const events = createAskEventEmitter(pi, toolCallId);
    const subjects = questions.map(({ question, context, options }) => ({ question, context, options }));
    const details = (answers: BatchAnswer[], cancelled: boolean): AskBatchDetails => ({
       kind: "batch",
@@ -2941,16 +3219,25 @@ async function executeBatch(
    signal?.addEventListener("abort", forwardAbort, { once: true });
    // An abort that already fired (for example inside onUpdate above) is not replayed.
    if (signal?.aborted) batch.abort();
-   const deadlineTimer = deadline === undefined ? undefined : setTimeout(() => batch.abort(), params.timeout);
+   const deadlineTimer = deadline === undefined ? undefined : setTimeout(() => batch.abort(ASK_TIMED_OUT), params.timeout);
    let answers: BatchAnswer[] | null;
    try {
-      answers = await whileBlocked(pi, () => runCustomPrompt<BatchAnswer[]>(ctx.ui, {
+      answers = await whileBlocked(pi, toolCallId, () => runCustomPrompt<BatchAnswer[]>(pi, ctx.ui, {
          signal: batch.signal,
          displayMode: settings.displayMode,
          overlayToggle: settings.shortcuts.overlayToggle,
+         blockedMessage: heading ?? `${questions.length} questions`,
          createComponent: (tui, theme, keybindings, complete) =>
             new BatchAskComponent(questions, settings, tui, theme, keybindings, complete, heading),
          fallback: () => askBatchViaDialogs(ctx.ui, questions, settings.allowComment, batch.signal, deadline, heading),
+         park: {
+            id: toolCallId,
+            kind: "ask_user.batch",
+            title: heading ?? `${questions.length} questions`,
+            view: batchView(questions, settings.allowComment, heading),
+            ...(deadline !== undefined ? { expiresAt: deadline } : {}),
+            parse: (raw) => parseBatchAnswers(raw, questions, settings.allowComment),
+         },
       }));
    } finally {
       if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
@@ -3139,7 +3426,7 @@ export default function(pi: ExtensionAPI) {
          ),
       }),
 
-      async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      async execute(toolCallId, params, signal, onUpdate, ctx) {
          if ((params as AskParams).questions != null) {
             if (signal?.aborted) {
                return {
@@ -3147,7 +3434,7 @@ export default function(pi: ExtensionAPI) {
                   details: { kind: "batch", questions: [], answers: [], cancelled: true } as AskBatchDetails,
                };
             }
-            return executeBatch(pi, params as AskParams, signal, onUpdate, ctx);
+            return executeBatch(pi, toolCallId, params as AskParams, signal, onUpdate, ctx);
          }
 
          if (signal?.aborted) {
@@ -3178,7 +3465,7 @@ export default function(pi: ExtensionAPI) {
          const dialogOpts = signal
             ? (timeout ? { signal, timeout } : { signal })
             : (timeout ? { timeout } : undefined);
-         const events = createAskEventEmitter(pi);
+         const events = createAskEventEmitter(pi, toolCallId);
          const subject: AskEventSubject = { question, context: normalizedContext, options };
 
          if (rawOptions.length > 0 && options.length === 0) {
@@ -3201,8 +3488,21 @@ export default function(pi: ExtensionAPI) {
 
          if (options.length === 0) {
             const prompt = normalizedContext ? `${question}\n\nContext:\n${normalizedContext}` : question;
-            const answer = await whileBlocked(pi, () => ctx.ui.input(prompt, "Type your answer...", dialogOpts));
-            const response = signal?.aborted ? null : createFreeformResponse(answer);
+            const response = await whileBlocked(pi, toolCallId, () => runInputPrompt(
+               pi,
+               ctx.ui,
+               prompt,
+               dialogOpts,
+               ctx.mode === "tui"
+                  ? {
+                     id: toolCallId,
+                     kind: "ask_user.question",
+                     title: question,
+                     view: questionView(question, normalizedContext, options, allowMultiple, allowFreeform, allowComment),
+                     parse: (raw) => parseAskResponse(raw, { options, allowMultiple, allowFreeform }, allowComment),
+                  }
+                  : undefined,
+            ));
 
             if (!response) {
                events.cancelled(subject);
@@ -3224,11 +3524,12 @@ export default function(pi: ExtensionAPI) {
             details: { question, context: normalizedContext, options, response: null, cancelled: false },
          });
 
-         const result = await whileBlocked(pi, () => runCustomPrompt<AskUIResult>(ctx.ui, {
+         const result = await whileBlocked(pi, toolCallId, () => runCustomPrompt<AskUIResult>(pi, ctx.ui, {
             signal,
             timeout,
             displayMode: settings.displayMode,
             overlayToggle: settings.shortcuts.overlayToggle,
+            blockedMessage: question,
             createComponent: (tui, theme, keybindings, complete) => new AskComponent(
                question,
                normalizedContext,
@@ -3255,6 +3556,13 @@ export default function(pi: ExtensionAPI) {
                allowComment,
                dialogOpts,
             ),
+            park: {
+               id: toolCallId,
+               kind: "ask_user.question",
+               title: question,
+               view: questionView(question, normalizedContext, options, allowMultiple, allowFreeform, allowComment),
+               parse: (raw) => parseAskResponse(raw, { options, allowMultiple, allowFreeform }, allowComment),
+            },
          }));
 
          if (signal?.aborted || result === null) {

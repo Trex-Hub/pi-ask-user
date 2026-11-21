@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, mock, onTestFinished, spyOn, tes
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getEventListeners } from "node:events";
+import { EventEmitter, getEventListeners } from "node:events";
 import * as realPiTui from "@earendil-works/pi-tui";
 import type { StringEnumBuilder } from "./index";
 import { NATIVE_COMPONENT, type TernContext, type TernEvent, type TernNode } from "./tern";
@@ -14,6 +14,8 @@ const realPiTuiExports = { ...realPiTui };
 let editorInputs: string[] = [];
 let editorText = "";
 let emittedEvents: Array<{ name: string; payload: any }> = [];
+// The fake pi's bus. Tests stand in for pi-live by listening on it (see fakePiLive).
+let piEvents = new EventEmitter();
 
 let isolatedAgentDir: string;
 let originalAgentDir: string | undefined;
@@ -267,6 +269,7 @@ async function setupTool(): Promise<RegisteredTool> {
    const { default: askUserExtension } = await import("./index");
    let registeredTool: RegisteredTool | undefined;
    emittedEvents = [];
+   piEvents = new EventEmitter();
    const pi = {
       registerTool(tool: RegisteredTool) {
          registeredTool = tool;
@@ -275,7 +278,13 @@ async function setupTool(): Promise<RegisteredTool> {
       on() {},
       events: {
          emit(name: string, payload: any) {
-            emittedEvents.push({ name, payload });
+            // A park is a request to pi-live, not an ask_user event; the parking tests read it from piEvents.
+            if (name !== "pi-live:park") emittedEvents.push({ name, payload });
+            piEvents.emit(name, payload);
+         },
+         on(name: string, handler: (payload: any) => void) {
+            piEvents.on(name, handler);
+            return () => piEvents.off(name, handler);
          },
       },
    } as any;
@@ -344,8 +353,8 @@ describe("ask_user", () => {
       );
 
       expect(emittedEvents.filter((event) => event.name === "herdr:blocked")).toEqual([
-         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response" } },
-         { name: "herdr:blocked", payload: { active: false } },
+         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response", toolCallId: "tool-call-id" } },
+         { name: "herdr:blocked", payload: { active: false, toolCallId: "tool-call-id" } },
       ]);
    });
 
@@ -361,8 +370,8 @@ describe("ask_user", () => {
       );
 
       expect(emittedEvents.filter((event) => event.name === "herdr:blocked")).toEqual([
-         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response" } },
-         { name: "herdr:blocked", payload: { active: false } },
+         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response", toolCallId: "tool-call-id" } },
+         { name: "herdr:blocked", payload: { active: false, toolCallId: "tool-call-id" } },
       ]);
    });
 
@@ -379,8 +388,8 @@ describe("ask_user", () => {
 
       expect(error.message).toBe("UI failed");
       expect(emittedEvents.filter((event) => event.name === "herdr:blocked")).toEqual([
-         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response" } },
-         { name: "herdr:blocked", payload: { active: false } },
+         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response", toolCallId: "tool-call-id" } },
+         { name: "herdr:blocked", payload: { active: false, toolCallId: "tool-call-id" } },
       ]);
    });
 
@@ -414,8 +423,8 @@ describe("ask_user", () => {
 
       expect(result.details.cancelled).toBe(true);
       expect(emittedEvents.filter((event) => event.name === "herdr:blocked")).toEqual([
-         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response" } },
-         { name: "herdr:blocked", payload: { active: false } },
+         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response", toolCallId: "tool-call-id" } },
+         { name: "herdr:blocked", payload: { active: false, toolCallId: "tool-call-id" } },
       ]);
    });
 
@@ -443,7 +452,7 @@ describe("ask_user", () => {
 
          expect(result.details.response).toEqual({ kind: "freeform", text: "my private answer" });
          expect(emittedEvents.filter((event) => event.name === "ask:answered")).toEqual([
-            { name: "ask:answered", payload: { question: "Why?", response: { kind: "freeform" } } },
+            { name: "ask:answered", payload: { question: "Why?", response: { kind: "freeform" }, toolCallId: "tool-call-id" } },
          ]);
       });
 
@@ -453,7 +462,7 @@ describe("ask_user", () => {
 
          expect(result.details.cancelled).toBe(true);
          expect(emittedEvents.filter((event) => event.name === "ask:cancelled")).toEqual([
-            { name: "ask:cancelled", payload: { question: "Pick" } },
+            { name: "ask:cancelled", payload: { question: "Pick", toolCallId: "tool-call-id" } },
          ]);
       });
 
@@ -466,7 +475,7 @@ describe("ask_user", () => {
          expect(emittedEvents.filter((event) => event.name.startsWith("ask:"))).toEqual([
             {
                name: "ask:answered",
-               payload: { question: "Why?", context: "secret context", response: { kind: "freeform", text: "my private answer" } },
+               payload: { question: "Why?", context: "secret context", response: { kind: "freeform", text: "my private answer" }, toolCallId: "tool-call-id" },
             },
             {
                name: "ask:cancelled",
@@ -474,6 +483,7 @@ describe("ask_user", () => {
                   question: "Pick",
                   context: "secret context",
                   options: [{ title: "A" }, { title: "B" }],
+                  toolCallId: "tool-call-id",
                },
             },
          ]);
@@ -531,7 +541,7 @@ describe("ask_user", () => {
          },
       );
 
-      expect(capturedOptions).toBeUndefined();
+      expect(capturedOptions).toEqual({ blocked: { kind: "question", message: "Which option should we use?" } });
       expect(result.details.cancelled).toBe(true);
    });
 
@@ -625,7 +635,7 @@ describe("ask_user", () => {
          },
       );
 
-      expect(capturedOptions).toBeUndefined();
+      expect(capturedOptions.overlay).toBeUndefined();
    });
 
    test("normalizes PI_ASK_USER_DISPLAY_MODE before applying it", async () => {
@@ -649,7 +659,7 @@ describe("ask_user", () => {
          },
       );
 
-      expect(capturedOptions).toBeUndefined();
+      expect((capturedOptions as { overlay?: boolean }).overlay).toBeUndefined();
    });
 
    test("call-level displayMode overrides PI_ASK_USER_DISPLAY_MODE env var", async () => {
@@ -1657,7 +1667,7 @@ describe("ask_user", () => {
       expect(result.isError).not.toBe(true);
       expect(result.details.response).toEqual({ kind: "freeform", text: "custom from editor" });
       expect(result.details.cancelled).toBe(false);
-      expect(answeredEvent?.payload).toEqual({ question: "Which option should we use?", response: { kind: "freeform" } });
+      expect(answeredEvent?.payload).toEqual({ question: "Which option should we use?", response: { kind: "freeform" }, toolCallId: "tool-call-id" });
       expect(editorInputs).toEqual(["enter"]);
    });
 
@@ -3303,7 +3313,7 @@ describe("cancellation correctness", () => {
             expect(result.details.response).toBeNull();
             expect(calls).toBe(callsBeforeAbort);
             expect(emittedEvents.filter((event) => event.name.startsWith("ask:"))).toEqual([
-               { name: "ask:cancelled", payload: { question: "Pick" } },
+               { name: "ask:cancelled", payload: { question: "Pick", toolCallId: "id" } },
             ]);
          });
       }
@@ -3381,8 +3391,8 @@ describe("cancellation correctness", () => {
             expect(result.details.cancelled).toBe(true);
             expect(emittedEvents.filter((event) => event.name.startsWith("ask:"))).toEqual([
                { name: "ask:cancelled", payload: fullEvents
-                  ? { question: "Why?", context: "private context", options: [] }
-                  : { question: "Why?" } },
+                  ? { question: "Why?", context: "private context", options: [], toolCallId: "id" }
+                  : { question: "Why?", toolCallId: "id" } },
             ]);
          });
       }
@@ -3470,7 +3480,7 @@ describe("cancellation correctness", () => {
          controller.abort();
          component?.handleInput("enter");
          expect(completions).toBe(isError ? 0 : 1);
-         expect(emittedEvents.filter((event) => event.name === "herdr:blocked").at(-1)?.payload).toEqual({ active: false });
+         expect(emittedEvents.filter((event) => event.name === "herdr:blocked").at(-1)?.payload).toEqual({ active: false, toolCallId: "id" });
       });
    }
 });
@@ -3625,10 +3635,10 @@ test("top-level single-question fields sent with questions are ignored (#88)", a
          text: "User answered 2 of 2 questions:\n1. Which database? → Postgres\n2. Anything else? → No",
       }]);
       expect(emittedEvents).toEqual([
-         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response" } },
-         { name: "herdr:blocked", payload: { active: false } },
-         { name: "ask:answered", payload: { question: "Which database?", response: { kind: "selection" }, batch: { index: 0, total: 2 } } },
-         { name: "ask:answered", payload: { question: "Anything else?", response: { kind: "freeform" }, batch: { index: 1, total: 2 } } },
+         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response", toolCallId: "id" } },
+         { name: "herdr:blocked", payload: { active: false, toolCallId: "id" } },
+         { name: "ask:answered", payload: { question: "Which database?", response: { kind: "selection" }, batch: { index: 0, total: 2 }, toolCallId: "id" } },
+         { name: "ask:answered", payload: { question: "Anything else?", response: { kind: "freeform" }, batch: { index: 1, total: 2 }, toolCallId: "id" } },
       ]);
    });
 
@@ -3719,7 +3729,7 @@ test("top-level single-question fields sent with questions are ignored (#88)", a
          text: "User answered 1 of 2 questions:\n1. First? → A\n2. Second? → (skipped)",
       }]);
       expect(emittedEvents.filter((event) => event.name.startsWith("ask:"))).toEqual([
-         { name: "ask:answered", payload: { question: "First?", response: { kind: "selection" }, batch: { index: 0, total: 2 } } },
+         { name: "ask:answered", payload: { question: "First?", response: { kind: "selection" }, batch: { index: 0, total: 2 }, toolCallId: "id" } },
       ]);
    });
 
@@ -3829,8 +3839,8 @@ test("top-level single-question fields sent with questions are ignored (#88)", a
          expect(prompts).toBe(1);
          expect(result.content).toEqual([{ type: "text", text: "User cancelled the questions" }]);
          expect(emittedEvents.filter((event) => event.name.startsWith("ask:"))).toEqual([
-            { name: "ask:cancelled", payload: { question: "First?", batch: { index: 0, total: 2 } } },
-            { name: "ask:cancelled", payload: { question: "Second?", batch: { index: 1, total: 2 } } },
+            { name: "ask:cancelled", payload: { question: "First?", batch: { index: 0, total: 2 }, toolCallId: "id" } },
+            { name: "ask:cancelled", payload: { question: "Second?", batch: { index: 1, total: 2 }, toolCallId: "id" } },
          ]);
       });
    }
@@ -3989,14 +3999,14 @@ test("top-level single-question fields sent with questions are ignored (#88)", a
       test("uses ask-user.json displayMode when the env var and call-level value are unset", async () => {
          stubSettingsFile(JSON.stringify({ displayMode: "inline" }));
          const capturedOptions = await executeWithCapturedOptions({});
-         expect(capturedOptions).toBeUndefined();
+         expect(capturedOptions.overlay).toBeUndefined();
       });
 
       test("PI_ASK_USER_DISPLAY_MODE env var overrides ask-user.json", async () => {
          stubSettingsFile(JSON.stringify({ displayMode: "overlay" }));
          stubEnv("PI_ASK_USER_DISPLAY_MODE", "inline");
          const capturedOptions = await executeWithCapturedOptions({});
-         expect(capturedOptions).toBeUndefined();
+         expect(capturedOptions.overlay).toBeUndefined();
       });
 
       test("call-level displayMode overrides ask-user.json", async () => {
@@ -4252,5 +4262,669 @@ describe("Tern native presentation", () => {
          expect(headingOf()).toBe(JSON.stringify([{ t: "Project setup" }]));
          present(component).fire({ ev: "action", act: "submit" });
       });
+   });
+});
+
+describe("Needs You (blocked program status)", () => {
+   async function capturedCustomOptions(params: Record<string, unknown>) {
+      const tool = await setupTool();
+      let capturedOptions: any;
+      await tool.execute("tool-call-id", params, undefined, undefined, {
+         hasUI: true,
+         ui: {
+            custom: async (_factory: any, options: any) => {
+               capturedOptions = options;
+               return null;
+            },
+         },
+      });
+      return capturedOptions;
+   }
+
+   const batch = { questions: [{ question: "Which database?", options: ["Postgres"] }, { question: "Which ORM?" }] };
+
+   for (const displayMode of ["inline", "overlay"] as const) {
+      test(`a single question reports blocked with its text in ${displayMode} mode`, async () => {
+         const options = await capturedCustomOptions({ question: "Which color?", options: ["Green", "Blue"], displayMode });
+         expect(options.blocked).toEqual({ kind: "question", message: "Which color?" });
+         expect(options.overlay).toBe(displayMode === "overlay" ? true : undefined);
+      });
+
+      test(`a batch reports blocked with its heading in ${displayMode} mode`, async () => {
+         const options = await capturedCustomOptions({ ...batch, question: "Project setup\nChoose defaults", displayMode });
+         expect(options.blocked).toEqual({ kind: "question", message: "Project setup Choose defaults" });
+         expect(options.overlay).toBe(displayMode === "overlay" ? true : undefined);
+      });
+
+      test(`a batch without a heading reports its question count in ${displayMode} mode`, async () => {
+         const options = await capturedCustomOptions({ ...batch, displayMode });
+         expect(options.blocked).toEqual({ kind: "question", message: "2 questions" });
+      });
+   }
+
+   test("a long question is cut to one short line", async () => {
+      const question = `Should we ${"really ".repeat(20)}\n\nship it?`;
+      const options = await capturedCustomOptions({ question, options: ["Yes", "No"] });
+      expect(options.blocked.message).toHaveLength(80);
+      expect(options.blocked.message).toStartWith("Should we really really");
+      expect(options.blocked.message).toEndWith("…");
+      expect(options.blocked.message).not.toContain("\n");
+   });
+});
+
+describe("tool call id on events", () => {
+   const answering = (response: unknown) => ({ hasUI: true, ui: { custom: async () => response } });
+
+   test("herdr:blocked (both states) and ask:answered carry the tool call id", async () => {
+      const tool = await setupTool();
+      await tool.execute("call_answer", { question: "Color?", options: ["Green"] }, undefined, undefined,
+         answering({ kind: "selection", selections: ["Green"] }));
+      expect(emittedEvents).toEqual([
+         { name: "herdr:blocked", payload: { active: true, label: "Waiting for user response", toolCallId: "call_answer" } },
+         { name: "herdr:blocked", payload: { active: false, toolCallId: "call_answer" } },
+         { name: "ask:answered", payload: { question: "Color?", response: { kind: "selection" }, toolCallId: "call_answer" } },
+      ]);
+   });
+
+   test("ask:cancelled carries the tool call id, with full events too", async () => {
+      stubEnv("PI_ASK_USER_EMIT_FULL_EVENTS", "true");
+      const tool = await setupTool();
+      await tool.execute("call_cancel", { question: "Color?", options: ["Green"] }, undefined, undefined, answering(null));
+      expect(emittedEvents.filter((event) => event.name === "ask:cancelled")).toEqual([
+         { name: "ask:cancelled", payload: { question: "Color?", options: [{ title: "Green" }], toolCallId: "call_cancel" } },
+      ]);
+   });
+
+   test("the options-less question carries the tool call id", async () => {
+      const tool = await setupTool();
+      await tool.execute("call_input", { question: "Why?" }, undefined, undefined, { hasUI: true, ui: { input: async () => "Because" } });
+      expect(emittedEvents.map((event) => event.payload.toolCallId)).toEqual(["call_input", "call_input", "call_input"]);
+   });
+
+   test("batch events carry the tool call id", async () => {
+      const tool = await setupTool();
+      await tool.execute(
+         "call_batch",
+         { questions: [{ question: "First?", options: ["A"] }, { question: "Second?", options: ["B"] }] },
+         undefined,
+         undefined,
+         answering([{ status: "answered", response: { kind: "selection", selections: ["A"] } }, { status: "skipped" }]),
+      );
+      await tool.execute("call_batch_cancel", { questions: [{ question: "First?" }, { question: "Second?" }] }, undefined, undefined, answering(null));
+      expect(emittedEvents.map((event) => [event.name, event.payload.toolCallId])).toEqual([
+         ["herdr:blocked", "call_batch"],
+         ["herdr:blocked", "call_batch"],
+         ["ask:answered", "call_batch"],
+         ["herdr:blocked", "call_batch_cancel"],
+         ["herdr:blocked", "call_batch_cancel"],
+         ["ask:cancelled", "call_batch_cancel"],
+         ["ask:cancelled", "call_batch_cancel"],
+      ]);
+   });
+
+   test("two calls with the same question text are told apart by their ids", async () => {
+      const tool = await setupTool();
+      let release!: (value: unknown) => void;
+      const first = tool.execute("call_1", { question: "Color?", options: ["Green", "Blue"] }, undefined, undefined, {
+         hasUI: true,
+         ui: { custom: () => new Promise((resolve) => { release = resolve; }) },
+      });
+      await tool.execute("call_2", { question: "Color?", options: ["Green", "Blue"] }, undefined, undefined,
+         answering({ kind: "selection", selections: ["Blue"] }));
+      release(null);
+      await first;
+      expect(emittedEvents.filter((event) => event.name.startsWith("ask:"))).toEqual([
+         { name: "ask:answered", payload: { question: "Color?", response: { kind: "selection" }, toolCallId: "call_2" } },
+         { name: "ask:cancelled", payload: { question: "Color?", toolCallId: "call_1" } },
+      ]);
+      expect(emittedEvents.filter((event) => event.name === "herdr:blocked").map((event) => event.payload)).toEqual([
+         { active: true, label: "Waiting for user response", toolCallId: "call_1" },
+         { active: true, label: "Waiting for user response", toolCallId: "call_2" },
+         { active: false, toolCallId: "call_2" },
+         { active: false, toolCallId: "call_1" },
+      ]);
+   });
+});
+
+describe("pi-live parking", () => {
+   const client = { connId: "conn-1", name: "phone" };
+
+   /** Stands in for pi-live: accepts every park, keeps the request, and records how each one closed. */
+   function fakePiLive() {
+      const parks: any[] = [];
+      const closes: Array<{ id: string; outcome: any }> = [];
+      piEvents.on("pi-live:park", (request: any) => {
+         parks.push(request);
+         request.accept({ close: (outcome: any) => closes.push({ id: request.id, outcome }) });
+      });
+      return { parks, closes };
+   }
+
+   // Mounts the prompt synchronously; keys go to `state.component`, and pi's `done` is counted.
+   function mountPrompt(onOptions?: (options: any) => void) {
+      const state: { component?: any; doneCalls: number } = { doneCalls: 0 };
+      const custom = (factory: any, options: any) => new Promise((resolve) => {
+         onOptions?.(options);
+         state.component = factory(
+            { requestRender() { }, terminal: { rows: 24 } },
+            createTheme(),
+            createKeybindings(),
+            (value: unknown) => {
+               state.doneCalls++;
+               resolve(value);
+            },
+         );
+      });
+      return { state, custom };
+   }
+
+   const press = (component: any, ...keys: string[]) => keys.forEach((key) => component.handleInput(key));
+   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+   const color = { question: "Color?", options: ["Green", "Blue"] };
+   const batch = { questions: [{ question: "Which database?", options: ["Postgres", "SQLite"] }, { question: "Which ORM?", options: ["Drizzle"] }] };
+
+   async function open(params: Record<string, unknown>, signal?: AbortSignal, onOptions?: (options: any) => void) {
+      const tool = await setupTool();
+      const live = fakePiLive();
+      const { state, custom } = mountPrompt(onOptions);
+      const execution = tool.execute("call_park", params, signal, undefined, { hasUI: true, ui: { custom } });
+      return { live, state, execution, park: live.parks[0] };
+   }
+
+   describe("parks the open prompt", () => {
+      test("a single question with its id, kind, title, view and expiry", async () => {
+         const before = Date.now();
+         const { live, state, execution } = await open({
+            question: "Color?",
+            context: " For the theme ",
+            options: [{ title: "Green", description: "Calm" }, "Blue"],
+            allowMultiple: true,
+            allowFreeform: false,
+            timeout: 60_000,
+         });
+         const after = Date.now();
+         expect(live.parks).toHaveLength(1);
+         const { answer, accept, expiresAt, ...park } = live.parks[0];
+         expect(park).toEqual({
+            protocol: 1,
+            id: "call_park",
+            owner: "ask_user",
+            kind: "ask_user.question",
+            title: "Color?",
+            view: {
+               question: "Color?",
+               context: "For the theme",
+               options: [{ title: "Green", description: "Calm" }, { title: "Blue" }],
+               allowMultiple: true,
+               allowFreeform: false,
+               allowComment: false,
+               answer: { kind: "selection | freeform" },
+            },
+         });
+         expect(typeof answer).toBe("function");
+         expect(typeof accept).toBe("function");
+         expect(expiresAt).toBeGreaterThanOrEqual(before + 60_000);
+         expect(expiresAt).toBeLessThanOrEqual(after + 60_000);
+         press(state.component, "escape");
+         await execution;
+      });
+
+      test("a question without context or timeout leaves both out", async () => {
+         const { park, state, execution } = await open(color);
+         expect("expiresAt" in park).toBe(false);
+         expect("context" in park.view).toBe(false);
+         press(state.component, "escape");
+         await execution;
+      });
+
+      test("a batch with its heading as the title, and the batch deadline as the expiry", async () => {
+         const before = Date.now();
+         const { park, state, execution } = await open({
+            question: "Project setup",
+            allowComment: true,
+            timeout: 60_000,
+            questions: [
+               { question: "Which database?", context: "Prod", options: [{ title: "Postgres", description: "Default" }], allowMultiple: true },
+               { question: "Anything else?", allowFreeform: false },
+            ],
+         });
+         expect(park.kind).toBe("ask_user.batch");
+         expect(park.title).toBe("Project setup");
+         expect(park.view).toEqual({
+            heading: "Project setup",
+            allowComment: true,
+            questions: [
+               { question: "Which database?", context: "Prod", options: [{ title: "Postgres", description: "Default" }], allowMultiple: true, allowFreeform: true },
+               { question: "Anything else?", options: [], allowMultiple: false, allowFreeform: false },
+            ],
+         });
+         expect(park.expiresAt).toBeGreaterThanOrEqual(before + 60_000);
+         expect(park.expiresAt).toBeLessThanOrEqual(Date.now() + 60_000);
+         press(state.component, "escape");
+         await execution;
+      });
+
+      test("a batch without a heading is titled by its question count", async () => {
+         const { park, state, execution } = await open(batch);
+         expect(park.title).toBe("2 questions");
+         expect("heading" in park.view).toBe(false);
+         expect("expiresAt" in park).toBe(false);
+         press(state.component, "escape");
+         await execution;
+      });
+   });
+
+   describe("without pi-live", () => {
+      async function keyboardAnswer(listen: () => void) {
+         const tool = await setupTool();
+         listen();
+         const { state, custom } = mountPrompt();
+         const execution = tool.execute("call_park", color, undefined, undefined, { hasUI: true, ui: { custom } });
+         press(state.component, "down", "enter");
+         return { result: await execution, events: emittedEvents };
+      }
+
+      test("nothing listening, or a listener that does not accept, leaves the prompt and its result unchanged", async () => {
+         const plain = await keyboardAnswer(() => { });
+         const parks: any[] = [];
+         const declined = await keyboardAnswer(() => piEvents.on("pi-live:park", (request: any) => parks.push(request)));
+         expect(parks).toHaveLength(1);
+         expect(declined).toEqual(plain);
+         expect(plain.result.content).toEqual([{ type: "text", text: "User answered: Blue" }]);
+      });
+   });
+
+   describe("a client answer gives the keyboard's result", () => {
+      async function keyboardRun(params: Record<string, unknown>, keys: (component: any) => void) {
+         const tool = await setupTool();
+         const { state, custom } = mountPrompt();
+         const execution = tool.execute("call_park", params, undefined, undefined, { hasUI: true, ui: { custom } });
+         keys(state.component);
+         return { result: await execution, events: emittedEvents };
+      }
+
+      async function clientRun(params: Record<string, unknown>, raw: unknown) {
+         const { live, park, state, execution } = await open(params);
+         expect(park.answer(raw, client)).toEqual({ status: "delivered" });
+         const result = await execution;
+         expect(state.doneCalls).toBe(1);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "client", client } }]);
+         return { result, events: emittedEvents };
+      }
+
+      const cases: Array<{ name: string; params: Record<string, unknown>; keys: (component: any) => void; answer: unknown }> = [
+         {
+            name: "single choice",
+            params: color,
+            keys: (component) => press(component, "down", "enter"),
+            answer: { kind: "selection", selections: [" Blue "] },
+         },
+         {
+            name: "multiple choice, in option order",
+            params: { question: "Which?", options: ["Alpha", "Beta", "Gamma"], allowMultiple: true },
+            keys: (component) => press(component, "space", "down", "down", "space", "enter"),
+            answer: { kind: "selection", selections: ["Gamma", "Alpha"] },
+         },
+         {
+            name: "freeform",
+            params: { question: "Which?", options: ["Alpha", "Beta"] },
+            keys: (component) => {
+               press(component, "z", "z", "z", "enter");
+               editorText = "custom from editor";
+               press(component, "enter");
+            },
+            answer: { kind: "freeform", text: "  custom from editor " },
+         },
+         {
+            name: "choice plus comment",
+            params: { question: "Which?", options: ["Alpha", "Beta"], allowComment: true },
+            keys: (component) => {
+               press(component, "ctrl+g", "enter");
+               editorText = "Needs audit logging.";
+               press(component, "enter");
+            },
+            answer: { kind: "selection", selections: ["Alpha"], comment: " Needs audit logging. ", extra: "ignored" },
+         },
+         {
+            name: "choice with an empty comment",
+            params: { question: "Which?", options: ["Alpha", "Beta"], allowComment: true },
+            keys: (component) => press(component, "enter"),
+            answer: { kind: "selection", selections: ["Alpha"], comment: "  " },
+         },
+         {
+            name: "batch with a skip",
+            params: batch,
+            keys: (component) => press(component, "down", "enter", "tab", "enter", "enter"),
+            answer: { answers: [{ status: "answered", response: { kind: "selection", selections: ["SQLite"] } }, { status: "skipped" }] },
+         },
+         {
+            name: "batch with every question skipped",
+            params: batch,
+            keys: (component) => press(component, "tab", "tab", "enter", "enter"),
+            answer: { answers: [{ status: "skipped" }, { status: "skipped" }] },
+         },
+         {
+            name: "batch with text for a question without options",
+            params: { questions: [{ question: "Which database?", options: ["Postgres"] }, { question: "Anything else?", allowFreeform: false }] },
+            keys: (component) => {
+               press(component, "enter");
+               editorText = "No";
+               press(component, "enter", "enter");
+            },
+            answer: { answers: [{ status: "answered", response: { kind: "selection", selections: ["Postgres"] } }, { status: "answered", response: { kind: "freeform", text: "No" } }] },
+         },
+      ];
+
+      for (const { name, params, keys, answer } of cases) {
+         test(name, async () => {
+            const keyboard = await keyboardRun(params, keys);
+            const parked = await clientRun(params, answer);
+            expect(parked.result.details.cancelled).toBe(false);
+            expect(parked.result).toEqual(keyboard.result);
+            expect(parked.events).toEqual(keyboard.events);
+         });
+      }
+   });
+
+   describe("rejects an answer the prompt could not produce, and stays open", () => {
+      const cases: Array<{ name: string; params: Record<string, unknown>; answer: unknown; reason: string }> = [
+         { name: "an option not offered", params: color, answer: { kind: "selection", selections: ["Purple"] }, reason: "option \"Purple\" not offered" },
+         { name: "two selections when single", params: color, answer: { kind: "selection", selections: ["Green", "Blue"] }, reason: "only one selection allowed" },
+         { name: "the same option twice", params: { ...color, allowMultiple: true }, answer: { kind: "selection", selections: ["Green", "Green"] }, reason: "option \"Green\" selected twice" },
+         { name: "freeform when not allowed", params: { ...color, allowFreeform: false }, answer: { kind: "freeform", text: "Teal" }, reason: "freeform not allowed" },
+         { name: "blank freeform", params: color, answer: { kind: "freeform", text: "  " }, reason: "text must be a non-empty string" },
+         { name: "a comment when not allowed", params: color, answer: { kind: "selection", selections: ["Green"], comment: "why" }, reason: "comment not allowed" },
+         { name: "a comment that is not a string", params: { ...color, allowComment: true }, answer: { kind: "selection", selections: ["Green"], comment: 3 }, reason: "comment must be a string" },
+         { name: "empty selections", params: color, answer: { kind: "selection", selections: [] }, reason: "selections must be a non-empty array of strings" },
+         { name: "an unknown kind", params: color, answer: { kind: "vote" }, reason: "kind must be \"selection\" or \"freeform\"" },
+         { name: "a bare string", params: color, answer: "Green", reason: "expected an object with kind \"selection\" or \"freeform\"" },
+         { name: "null", params: color, answer: null, reason: "expected an object with kind \"selection\" or \"freeform\"" },
+         { name: "a wrong batch size", params: batch, answer: { answers: [{ status: "skipped" }] }, reason: "expected 2 answers, got 1" },
+         { name: "a batch without answers", params: batch, answer: [{ status: "skipped" }], reason: "expected an object with an answers array" },
+         { name: "a bad batch status", params: batch, answer: { answers: [{ status: "skipped" }, { status: "maybe" }] }, reason: "answer 2: status must be \"answered\" or \"skipped\"" },
+         {
+            name: "a bad batch response",
+            params: batch,
+            answer: { answers: [{ status: "answered", response: { kind: "selection", selections: ["MySQL"] } }, { status: "skipped" }] },
+            reason: "answer 1: option \"MySQL\" not offered",
+         },
+         {
+            name: "a batch comment when not allowed",
+            params: batch,
+            answer: { answers: [{ status: "answered", response: { kind: "selection", selections: ["Postgres"], comment: "x" } }, { status: "skipped" }] },
+            reason: "answer 1: comment not allowed",
+         },
+      ];
+
+      for (const { name, params, answer, reason } of cases) {
+         test(name, async () => {
+            const { live, park, state, execution } = await open(params);
+            expect(park.answer(answer, client)).toEqual({ status: "invalid", reason });
+            expect(state.doneCalls).toBe(0);
+            expect(live.closes).toEqual([]);
+            press(state.component, "enter");
+            if (params === batch) press(state.component, "enter", "enter");
+            const result = await execution;
+            expect(result.details.cancelled).toBe(false);
+            expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "keyboard" } }]);
+         });
+      }
+   });
+
+   describe("resolves once, and closes the ticket once", () => {
+      test("client answer, then the timeout", async () => {
+         const { live, park, state, execution } = await open({ ...color, timeout: 20 });
+         expect(park.answer({ kind: "selection", selections: ["Blue"] }, client)).toEqual({ status: "delivered" });
+         const result = await execution;
+         await sleep(40);
+         expect(result.content).toEqual([{ type: "text", text: "User answered: Blue" }]);
+         expect(state.doneCalls).toBe(1);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "client", client } }]);
+      });
+
+      test("abort, then a client answer is not open", async () => {
+         const controller = new AbortController();
+         const { live, park, execution } = await open(color, controller.signal);
+         controller.abort();
+         expect(park.answer({ kind: "selection", selections: ["Blue"] }, client)).toEqual({ status: "invalid", reason: "not open" });
+         const result = await execution;
+         expect(result.details.cancelled).toBe(true);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "abort" } }]);
+      });
+
+      test("keypress, then a client answer is not open", async () => {
+         const { live, park, state, execution } = await open(color);
+         press(state.component, "enter");
+         expect(park.answer({ kind: "selection", selections: ["Blue"] }, client)).toEqual({ status: "invalid", reason: "not open" });
+         const result = await execution;
+         expect(result.content).toEqual([{ type: "text", text: "User answered: Green" }]);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "keyboard" } }]);
+      });
+
+      test("client answer, then a keypress is ignored", async () => {
+         const { live, park, state, execution } = await open(color);
+         expect(park.answer({ kind: "selection", selections: ["Blue"] }, client)).toEqual({ status: "delivered" });
+         press(state.component, "enter");
+         const result = await execution;
+         expect(result.content).toEqual([{ type: "text", text: "User answered: Blue" }]);
+         expect(state.doneCalls).toBe(1);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "client", client } }]);
+      });
+
+      test("a cancel from the keyboard closes as keyboard", async () => {
+         const { live, state, execution } = await open(color);
+         press(state.component, "escape");
+         expect((await execution).details.cancelled).toBe(true);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "keyboard" } }]);
+      });
+
+      test("the timeout closes as timeout", async () => {
+         const { live, execution } = await open({ ...color, timeout: 10 });
+         expect((await execution).details.cancelled).toBe(true);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "timeout" } }]);
+      });
+
+      test("a failing prompt closes as error", async () => {
+         const tool = await setupTool();
+         const live = fakePiLive();
+         const custom = async (factory: any) => {
+            factory({ requestRender() { }, terminal: { rows: 24 } }, createTheme(), createKeybindings(), () => { });
+            throw new Error("render failed");
+         };
+         const error = await rejectedError(tool.execute("call_park", color, undefined, undefined, { hasUI: true, ui: { custom } }));
+         expect(error.message).toBe("render failed");
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "error" } }]);
+      });
+
+      test("the batch deadline closes as timeout", async () => {
+         const { live, execution } = await open({ ...batch, timeout: 10 });
+         expect((await execution).details.cancelled).toBe(true);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "timeout" } }]);
+      });
+
+      test("an outer abort of a batch closes as abort, even with a TimeoutError reason", async () => {
+         const controller = new AbortController();
+         const { live, execution } = await open({ ...batch, timeout: 60_000 }, controller.signal);
+         controller.abort(new DOMException("pi gave up", "TimeoutError"));
+         expect((await execution).details.cancelled).toBe(true);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "abort" } }]);
+      });
+
+      test("an outer abort of a single question with a TimeoutError reason closes as abort", async () => {
+         const controller = new AbortController();
+         const { live, execution } = await open(color, controller.signal);
+         controller.abort(new DOMException("pi gave up", "TimeoutError"));
+         expect((await execution).details.cancelled).toBe(true);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "abort" } }]);
+      });
+   });
+
+   describe("a question without options (the input dialog)", () => {
+      /** Behaves like pi's input dialog: closes on abort or timeout, and resolves undefined then. */
+      function fakeInput(onOpen?: () => void) {
+         const state: { opts?: any; calls: number; type?: (value: string | undefined) => void } = { calls: 0 };
+         const input = (_title: string, _placeholder: string, opts: any) => new Promise((resolve) => {
+            state.calls++;
+            state.opts = opts;
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const finish = (value: string | undefined) => {
+               clearTimeout(timer);
+               opts?.signal?.removeEventListener("abort", onAbort);
+               state.type = undefined;
+               resolve(value);
+            };
+            const onAbort = () => finish(undefined);
+            if (opts?.signal?.aborted) return finish(undefined);
+            opts?.signal?.addEventListener("abort", onAbort, { once: true });
+            if (opts?.timeout) timer = setTimeout(() => finish(undefined), opts.timeout);
+            state.type = finish;
+            onOpen?.();
+         });
+         return { state, input };
+      }
+
+      const why = { question: "Why?", context: " Release notes " };
+
+      async function openInput(params: Record<string, unknown>, signal?: AbortSignal, mode = "tui") {
+         const tool = await setupTool();
+         const live = fakePiLive();
+         const { state, input } = fakeInput();
+         const execution = tool.execute("call_park", params, signal, undefined, { hasUI: true, mode, ui: { input } });
+         return { live, state, execution, park: live.parks[0] };
+      }
+
+      test("parks with the question view and its expiry", async () => {
+         const before = Date.now();
+         const { park, state, execution } = await openInput({ ...why, timeout: 60_000 });
+         const { answer, accept, expiresAt, ...rest } = park;
+         expect(rest).toEqual({
+            protocol: 1,
+            id: "call_park",
+            owner: "ask_user",
+            kind: "ask_user.question",
+            title: "Why?",
+            view: {
+               question: "Why?",
+               context: "Release notes",
+               options: [],
+               allowMultiple: false,
+               allowFreeform: true,
+               allowComment: false,
+               answer: { kind: "selection | freeform" },
+            },
+         });
+         expect(expiresAt).toBeGreaterThanOrEqual(before + 60_000);
+         expect(expiresAt).toBeLessThanOrEqual(Date.now() + 60_000);
+         state.type?.(undefined);
+         await execution;
+      });
+
+      test("a client answer gives the keyboard's result and closes the dialog", async () => {
+         const keyboard = await (async () => {
+            const tool = await setupTool();
+            const { state, input } = fakeInput(() => state.type?.("Because"));
+            const result = await tool.execute("call_park", why, undefined, undefined, { hasUI: true, mode: "tui", ui: { input } });
+            return { result, events: emittedEvents };
+         })();
+         const { live, park, state, execution } = await openInput(why);
+         expect(park.answer({ kind: "freeform", text: " Because " }, client)).toEqual({ status: "delivered" });
+         expect(state.opts.signal.aborted).toBe(true);
+         const result = await execution;
+         expect(result).toEqual(keyboard.result);
+         expect(emittedEvents).toEqual(keyboard.events);
+         expect(result.content).toEqual([{ type: "text", text: "User answered: Because" }]);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "client", client } }]);
+      });
+
+      test("an invalid answer leaves the dialog open for the keyboard", async () => {
+         const { live, park, state, execution } = await openInput(why);
+         expect(park.answer({ kind: "selection", selections: ["Yes"] }, client)).toEqual({ status: "invalid", reason: "option \"Yes\" not offered" });
+         expect(park.answer({ kind: "freeform", text: " " }, client)).toEqual({ status: "invalid", reason: "text must be a non-empty string" });
+         expect(state.opts.signal.aborted).toBe(false);
+         state.type?.("Typed");
+         expect((await execution).content).toEqual([{ type: "text", text: "User answered: Typed" }]);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "keyboard" } }]);
+      });
+
+      test("keypress, then a client answer is not open; a keyboard cancel closes as keyboard", async () => {
+         const answered = await openInput(why);
+         answered.state.type?.("Typed");
+         // The dialog's answer reaches us a microtask later; a socket answer always comes in a later task.
+         await sleep(0);
+         expect(answered.park.answer({ kind: "freeform", text: "Late" }, client)).toEqual({ status: "invalid", reason: "not open" });
+         expect((await answered.execution).content).toEqual([{ type: "text", text: "User answered: Typed" }]);
+         expect(answered.live.closes).toEqual([{ id: "call_park", outcome: { by: "keyboard" } }]);
+
+         const cancelled = await openInput(why);
+         cancelled.state.type?.(undefined);
+         expect((await cancelled.execution).details.cancelled).toBe(true);
+         expect(cancelled.live.closes).toEqual([{ id: "call_park", outcome: { by: "keyboard" } }]);
+      });
+
+      test("an outer abort is still a cancel, and a later client answer is not open", async () => {
+         const controller = new AbortController();
+         const { live, park, execution } = await openInput(why, controller.signal);
+         controller.abort();
+         expect(park.answer({ kind: "freeform", text: "Late" }, client)).toEqual({ status: "invalid", reason: "not open" });
+         const result = await execution;
+         expect(result.details.cancelled).toBe(true);
+         expect(emittedEvents.filter((event) => event.name.startsWith("ask:")).map((event) => event.name)).toEqual(["ask:cancelled"]);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "abort" } }]);
+      });
+
+      test("the timeout closes as timeout", async () => {
+         const { live, park, execution } = await openInput({ ...why, timeout: 10 });
+         expect((await execution).details.cancelled).toBe(true);
+         expect(park.answer({ kind: "freeform", text: "Late" }, client)).toEqual({ status: "invalid", reason: "not open" });
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "timeout" } }]);
+      });
+
+      test("a failing dialog closes as error", async () => {
+         const tool = await setupTool();
+         const live = fakePiLive();
+         const input = async () => { throw new Error("dialog failed"); };
+         const error = await rejectedError(tool.execute("call_park", why, undefined, undefined, { hasUI: true, mode: "tui", ui: { input } }));
+         expect(error.message).toBe("dialog failed");
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "error" } }]);
+      });
+
+      test("RPC mode does not park, since the client would keep the aborted dialog open", async () => {
+         const { live, state, execution } = await openInput(why, undefined, "rpc");
+         expect(live.parks).toEqual([]);
+         state.type?.("Typed");
+         expect((await execution).content).toEqual([{ type: "text", text: "User answered: Typed" }]);
+         expect(live.closes).toEqual([]);
+      });
+   });
+
+   test("an answer while the overlay is hidden resolves it and tears it down", async () => {
+      const tool = await setupTool();
+      const live = fakePiLive();
+      let hidden = false;
+      let inputHandler: ((data: string) => any) | undefined;
+      let unsubscribed = false;
+      const { state, custom } = mountPrompt((options) => options.onHandle({
+         setHidden: (value: boolean) => { hidden = value; },
+         isHidden: () => hidden,
+      }));
+      const execution = tool.execute("call_park", { ...color, displayMode: "overlay" }, undefined, undefined, {
+         hasUI: true,
+         ui: {
+            custom,
+            onTerminalInput: (handler: (data: string) => any) => {
+               inputHandler = handler;
+               return () => { unsubscribed = true; };
+            },
+            notify: () => { },
+         },
+      });
+      inputHandler?.("\x1b[111;3:1u");
+      expect(hidden).toBe(true);
+      expect(live.parks[0].answer({ kind: "selection", selections: ["Blue"] }, client)).toEqual({ status: "delivered" });
+      const result = await execution;
+      expect(result.content).toEqual([{ type: "text", text: "User answered: Blue" }]);
+      expect(state.doneCalls).toBe(1);
+      expect(unsubscribed).toBe(true);
+      expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "client", client } }]);
    });
 });

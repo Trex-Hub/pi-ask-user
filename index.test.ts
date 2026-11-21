@@ -4759,6 +4759,144 @@ describe("pi-live parking", () => {
       });
    });
 
+   describe("a question without options (the input dialog)", () => {
+      /** Behaves like pi's input dialog: closes on abort or timeout, and resolves undefined then. */
+      function fakeInput(onOpen?: () => void) {
+         const state: { opts?: any; calls: number; type?: (value: string | undefined) => void } = { calls: 0 };
+         const input = (_title: string, _placeholder: string, opts: any) => new Promise((resolve) => {
+            state.calls++;
+            state.opts = opts;
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const finish = (value: string | undefined) => {
+               clearTimeout(timer);
+               opts?.signal?.removeEventListener("abort", onAbort);
+               state.type = undefined;
+               resolve(value);
+            };
+            const onAbort = () => finish(undefined);
+            if (opts?.signal?.aborted) return finish(undefined);
+            opts?.signal?.addEventListener("abort", onAbort, { once: true });
+            if (opts?.timeout) timer = setTimeout(() => finish(undefined), opts.timeout);
+            state.type = finish;
+            onOpen?.();
+         });
+         return { state, input };
+      }
+
+      const why = { question: "Why?", context: " Release notes " };
+
+      async function openInput(params: Record<string, unknown>, signal?: AbortSignal, mode = "tui") {
+         const tool = await setupTool();
+         const live = fakePiLive();
+         const { state, input } = fakeInput();
+         const execution = tool.execute("call_park", params, signal, undefined, { hasUI: true, mode, ui: { input } });
+         return { live, state, execution, park: live.parks[0] };
+      }
+
+      test("parks with the question view and its expiry", async () => {
+         const before = Date.now();
+         const { park, state, execution } = await openInput({ ...why, timeout: 60_000 });
+         const { answer, accept, expiresAt, ...rest } = park;
+         expect(rest).toEqual({
+            protocol: 1,
+            id: "call_park",
+            owner: "ask_user",
+            kind: "ask_user.question",
+            title: "Why?",
+            view: {
+               question: "Why?",
+               context: "Release notes",
+               options: [],
+               allowMultiple: false,
+               allowFreeform: true,
+               allowComment: false,
+               answer: { kind: "selection | freeform" },
+            },
+         });
+         expect(expiresAt).toBeGreaterThanOrEqual(before + 60_000);
+         expect(expiresAt).toBeLessThanOrEqual(Date.now() + 60_000);
+         state.type?.(undefined);
+         await execution;
+      });
+
+      test("a client answer gives the keyboard's result and closes the dialog", async () => {
+         const keyboard = await (async () => {
+            const tool = await setupTool();
+            const { state, input } = fakeInput(() => state.type?.("Because"));
+            const result = await tool.execute("call_park", why, undefined, undefined, { hasUI: true, mode: "tui", ui: { input } });
+            return { result, events: emittedEvents };
+         })();
+         const { live, park, state, execution } = await openInput(why);
+         expect(park.answer({ kind: "freeform", text: " Because " }, client)).toEqual({ status: "delivered" });
+         expect(state.opts.signal.aborted).toBe(true);
+         const result = await execution;
+         expect(result).toEqual(keyboard.result);
+         expect(emittedEvents).toEqual(keyboard.events);
+         expect(result.content).toEqual([{ type: "text", text: "User answered: Because" }]);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "client", client } }]);
+      });
+
+      test("an invalid answer leaves the dialog open for the keyboard", async () => {
+         const { live, park, state, execution } = await openInput(why);
+         expect(park.answer({ kind: "selection", selections: ["Yes"] }, client)).toEqual({ status: "invalid", reason: "option \"Yes\" not offered" });
+         expect(park.answer({ kind: "freeform", text: " " }, client)).toEqual({ status: "invalid", reason: "text must be a non-empty string" });
+         expect(state.opts.signal.aborted).toBe(false);
+         state.type?.("Typed");
+         expect((await execution).content).toEqual([{ type: "text", text: "User answered: Typed" }]);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "keyboard" } }]);
+      });
+
+      test("keypress, then a client answer is not open; a keyboard cancel closes as keyboard", async () => {
+         const answered = await openInput(why);
+         answered.state.type?.("Typed");
+         // The dialog's answer reaches us a microtask later; a socket answer always comes in a later task.
+         await sleep(0);
+         expect(answered.park.answer({ kind: "freeform", text: "Late" }, client)).toEqual({ status: "invalid", reason: "not open" });
+         expect((await answered.execution).content).toEqual([{ type: "text", text: "User answered: Typed" }]);
+         expect(answered.live.closes).toEqual([{ id: "call_park", outcome: { by: "keyboard" } }]);
+
+         const cancelled = await openInput(why);
+         cancelled.state.type?.(undefined);
+         expect((await cancelled.execution).details.cancelled).toBe(true);
+         expect(cancelled.live.closes).toEqual([{ id: "call_park", outcome: { by: "keyboard" } }]);
+      });
+
+      test("an outer abort is still a cancel, and a later client answer is not open", async () => {
+         const controller = new AbortController();
+         const { live, park, execution } = await openInput(why, controller.signal);
+         controller.abort();
+         expect(park.answer({ kind: "freeform", text: "Late" }, client)).toEqual({ status: "invalid", reason: "not open" });
+         const result = await execution;
+         expect(result.details.cancelled).toBe(true);
+         expect(emittedEvents.filter((event) => event.name.startsWith("ask:")).map((event) => event.name)).toEqual(["ask:cancelled"]);
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "abort" } }]);
+      });
+
+      test("the timeout closes as timeout", async () => {
+         const { live, park, execution } = await openInput({ ...why, timeout: 10 });
+         expect((await execution).details.cancelled).toBe(true);
+         expect(park.answer({ kind: "freeform", text: "Late" }, client)).toEqual({ status: "invalid", reason: "not open" });
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "timeout" } }]);
+      });
+
+      test("a failing dialog closes as error", async () => {
+         const tool = await setupTool();
+         const live = fakePiLive();
+         const input = async () => { throw new Error("dialog failed"); };
+         const error = await rejectedError(tool.execute("call_park", why, undefined, undefined, { hasUI: true, mode: "tui", ui: { input } }));
+         expect(error.message).toBe("dialog failed");
+         expect(live.closes).toEqual([{ id: "call_park", outcome: { by: "error" } }]);
+      });
+
+      test("RPC mode does not park, since the client would keep the aborted dialog open", async () => {
+         const { live, state, execution } = await openInput(why, undefined, "rpc");
+         expect(live.parks).toEqual([]);
+         state.type?.("Typed");
+         expect((await execution).content).toEqual([{ type: "text", text: "User answered: Typed" }]);
+         expect(live.closes).toEqual([]);
+      });
+   });
+
    test("an answer while the overlay is hidden resolves it and tears it down", async () => {
       const tool = await setupTool();
       const live = fakePiLive();

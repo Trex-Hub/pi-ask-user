@@ -2982,6 +2982,73 @@ async function runCustomPrompt<T>(pi: ExtensionAPI, ui: ExtensionUIContext, requ
    }
 }
 
+/**
+ * pi's input dialog for a question without options. With `park`, it is also
+ * offered to pi-live clients. We don't own that dialog's complete(), so a
+ * valid client answer is kept and closes the dialog by aborting a signal
+ * linked to the tool's; an abort of the tool's own signal is still a cancel.
+ * Park only in the TUI: in RPC mode an aborted dialog stays open in the client.
+ */
+async function runInputPrompt(
+   pi: ExtensionAPI,
+   ui: ExtensionUIContext,
+   prompt: string,
+   dialogOpts: DialogOptions | undefined,
+   park?: PromptPark<AskResponse>,
+): Promise<AskResponse | null> {
+   const signal = dialogOpts?.signal;
+   const timeout = dialogOpts?.timeout;
+   const linked = new AbortController();
+   let ticket: PiLiveTicket | undefined;
+   // The first of keyboard, client, timeout or abort to end the wait.
+   let closedBy: PiLiveCloseOutcome | undefined;
+   let clientAnswer: AskResponse | undefined;
+   const onAbort = () => {
+      closedBy ??= { by: "abort" };
+      linked.abort();
+   };
+   // Set up before the dialog's own timer with the same delay, so it fires first.
+   const timer = timeout && timeout > 0 ? setTimeout(() => { closedBy ??= { by: "timeout" }; }, timeout) : undefined;
+   signal?.addEventListener("abort", onAbort, { once: true });
+   try {
+      if (park && !signal?.aborted) {
+         pi.events.emit("pi-live:park", {
+            protocol: 1,
+            id: park.id,
+            owner: "ask_user",
+            kind: park.kind,
+            title: park.title,
+            view: park.view,
+            ...(timeout && timeout > 0 ? { expiresAt: Date.now() + timeout } : {}),
+            answer: (raw: unknown, from: PiLiveClient) => {
+               if (closedBy || linked.signal.aborted) return { status: "invalid", reason: "not open" };
+               const parsed = park.parse(raw);
+               if (!parsed.ok) return { status: "invalid", reason: parsed.reason };
+               closedBy = { by: "client", client: from };
+               clientAnswer = parsed.value;
+               linked.abort();
+               return { status: "delivered" };
+            },
+            accept: (accepted: PiLiveTicket) => {
+               ticket = accepted;
+            },
+         });
+      }
+
+      const answer = await ui.input(prompt, "Type your answer...", { ...dialogOpts, signal: linked.signal });
+      closedBy ??= { by: "keyboard" };
+      if (signal?.aborted) return null;
+      return clientAnswer ?? createFreeformResponse(answer);
+   } catch (error) {
+      closedBy = { by: "error" };
+      throw error;
+   } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      ticket?.close(closedBy ?? { by: "error" });
+   }
+}
+
 /** A top-level question sent with questions is the batch's heading, not another question (#80). */
 function batchHeading(params: AskParams): string | undefined {
    return typeof params.question === "string" && params.question.trim() ? params.question.trim() : undefined;
@@ -3421,8 +3488,21 @@ export default function(pi: ExtensionAPI) {
 
          if (options.length === 0) {
             const prompt = normalizedContext ? `${question}\n\nContext:\n${normalizedContext}` : question;
-            const answer = await whileBlocked(pi, toolCallId, () => ctx.ui.input(prompt, "Type your answer...", dialogOpts));
-            const response = signal?.aborted ? null : createFreeformResponse(answer);
+            const response = await whileBlocked(pi, toolCallId, () => runInputPrompt(
+               pi,
+               ctx.ui,
+               prompt,
+               dialogOpts,
+               ctx.mode === "tui"
+                  ? {
+                     id: toolCallId,
+                     kind: "ask_user.question",
+                     title: question,
+                     view: questionView(question, normalizedContext, options, allowMultiple, allowFreeform, allowComment),
+                     parse: (raw) => parseAskResponse(raw, { options, allowMultiple, allowFreeform }, allowComment),
+                  }
+                  : undefined,
+            ));
 
             if (!response) {
                events.cancelled(subject);

@@ -66,6 +66,6 @@
     "@sinclair/typebox": "*"
   },
   "dependencies": {
-    "@dev8-npm/pi-live": "github:Trex-Hub/pi-live#928f2c7a9a606b7a9f762f09187294128b8ef218"
+    "@dev8-npm/pi-live": "github:Trex-Hub/pi-live#62871ee1eed608b9272b8906b727fe37df5720fa"
   }
 }

@@ -284,7 +284,10 @@ This package bundles [pi-live](https://github.com/Trex-Hub/pi-live), which gives
 
 An answer from a client gives exactly the same tool result, rendering and `ask:answered` events as the same answer typed at the keyboard. The agent and the transcript can't tell them apart.
 
-To turn this off, set `PI_LIVE_ENABLED=0`, or put `{ "enabled": false }` in `~/.pi/agent/pi-live.json`. Prompts are then answered only at the keyboard. See the [pi-live README](https://github.com/Trex-Hub/pi-live#security) for who can reach the socket.
+The same socket also lets connected programs follow the session's chat and, unless you turn control off, send messages to the agent, stop it, or change its model. See the [pi-live README](https://github.com/Trex-Hub/pi-live#security) for who can reach the socket.
+
+- To keep prompt answering but turn control off, set `PI_LIVE_CONTROL=0`, or put `{ "control": false }` in `~/.pi/agent/pi-live.json`.
+- To turn the socket off entirely, set `PI_LIVE_ENABLED=0`, or put `{ "enabled": false }` in the same file. Prompts are then answered only at the keyboard.
 
 **What's offered:** single questions and batches in both display modes, including while the overlay is hidden, and in interactive mode, the text input of a question without options. In RPC mode nothing is offered, because pi can't tell an RPC client to close a dialog that was answered somewhere else.
 

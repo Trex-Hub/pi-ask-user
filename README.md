@@ -25,7 +25,7 @@ High-quality video: [ask-user-demo.mp4](https://github.com/edlsh/pi-ask-user/blo
 - System prompt integration via `promptSnippet` and `promptGuidelines`
 - Optional timeout for auto-dismiss in both overlay and fallback input modes
 - Reports pi's "waiting for user" status while a prompt is open, so terminals and multiplexers can show the session as waiting
-- Prompts can also be answered from other programs through the bundled [pi-live](https://github.com/Trex-Hub/pi-live) socket; the terminal prompt stays open and the first answer wins
+- Prompts can also be answered from other programs through the bundled [pi-live](https://github.com/Trex-Hub/pi-live) socket; the terminal prompt stays open and the first answer wins. The same socket lets those programs follow the session's chat and, unless you turn control off, drive it
 - Structured response and cancellation `details` for session state reconstruction
 - Graceful fallback when interactive UI is unavailable
 - Bundled `ask-user` skill for mandatory decision-gating in high-stakes or ambiguous tasks
@@ -53,7 +53,7 @@ See: `skills/ask-user/references/ask-user-skill-extension-spec.md`.
 pi install git:github.com/Trex-Hub/pi-ask-user
 ```
 
-This also installs [pi-live](https://github.com/Trex-Hub/pi-live), which lets other programs answer open prompts. See [Answering from other programs](#answering-from-other-programs).
+This also installs [pi-live](https://github.com/Trex-Hub/pi-live), which gives each pi session a local socket. Other programs on your machine can use it to answer open prompts, follow the chat, and send messages to the agent or stop it. See [Answering from other programs](#answering-from-other-programs) for what that means and how to limit it.
 
 `ask_user` can be registered only once. If you have the npm package installed, remove it first with `pi remove npm:pi-ask-user`.
 
